@@ -1,26 +1,29 @@
-;;; The #:ble package -- generic Bluetooth Low Energy, no vendor protocol.
+;;; The #:ble package -- generic Bluetooth Low Energy.
 ;;;
-;;; This library used to be one package, #:bledecode, holding both the BLE
-;;; plumbing and the Swift Sensors protocol built on top of it. They are now
-;;; separate:
+;;; Nothing in this library knows what kind of device it is talking to. It
+;;; carries HCI sockets, adapter enumeration, LE scanning, extended
+;;; advertising, advertising-data parsing, and an ATT/GATT client; what a
+;;; given vendor puts inside an advertising payload is a consumer's business.
 ;;;
-;;;   #:ble        HCI sockets, LE scanning, advertising, GATT/NUS, adapters,
-;;;                MAC byte order, octet primitives. Nothing here knows what
-;;;                a Swift sensor is.
-;;;   #:ble.swift  the Swift Sensors protocol: packet parsing, decryption,
-;;;                sample decoding, model and error tables, and the live glue
-;;;                that drives #:ble to scan for and advertise as Swift
-;;;                devices. See src/swift/package.lisp.
+;;; Two systems, split by platform:
 ;;;
-;;; The split is by domain. It cuts across the older split by platform, which
-;;; still matters just as much and is preserved: the ble/core system defined
-;;; here (this file, src/octets.lisp, src/mac.lisp) has no dependencies at
-;;; all, so ble/swift can be portable -- the Swift protocol and its test
-;;; suite still load on a machine with no BLE stack, which is the whole
-;;; reason `make test` runs on a Mac.
+;;;   ble/core  this file, src/octets.lisp, src/ad.lisp, src/mac.lisp.
+;;;             Octet vectors, little-endian integers, advertising-data
+;;;             records, MAC byte order. NO DEPENDENCIES AT ALL, which is
+;;;             load-bearing rather than tidy: it lets a consumer's protocol
+;;;             code -- and its test suite -- share this library while still
+;;;             loading on a machine with no Bluetooth stack.
+;;;   ble       the I/O layer. Adds cffi, and Linux/BlueZ. Its exports are
+;;;             declared in src/ble-package.lisp so that loading ble/core on
+;;;             a machine without a radio does not advertise a scanner that
+;;;             cannot run there.
 ;;;
-;;; The symbols below are ble/core's. The I/O layer adds its own exports in
-;;; src/ble-package.lisp, which loads with the Linux-only ble system.
+;;; A hazard worth knowing if you USE this package: a DEFUN of a name #:ble
+;;; already exports does not shadow it, it redefines it. A wrapper that then
+;;; delegates to that symbol calls itself forever, and it presents as a slow
+;;; compile rather than an error. Give a specialised version its own name.
+;;;
+;;; The symbols below are ble/core's.
 
 (defpackage #:ble
   (:use #:cl)

@@ -55,10 +55,10 @@ mutate and nobody else holds a reference to it."
   (is (null (ble:extract-manufacturer-data (ble:make-octets 0)))))
 
 (test local-name-prefers-nothing-and-accepts-either-type
-  ;; 0x09 complete local name "UD18"
-  (is (string= "UD18" (ble:adv-local-name (hex->octets "0509" "55443138"))))
+  ;; 0x09 complete local name "NODE"
+  (is (string= "NODE" (ble:adv-local-name (hex->octets "0509" "4E4F4445"))))
   ;; 0x08 shortened
-  (is (string= "UD" (ble:adv-local-name (hex->octets "0308" "5544"))))
+  (is (string= "NO" (ble:adv-local-name (hex->octets "0308" "4E4F"))))
   (is (null (ble:adv-local-name (hex->octets "020106")))))
 
 (test service-uuids-are-read-little-endian
@@ -69,8 +69,9 @@ mutate and nobody else holds a reference to it."
 
 ;;; --- MAC byte order ----------------------------------------------------
 ;;;
-;;; Moved here from bledecode when ble became its own library: parse/format
-;;; are this library's, so their tests are too.
+;;; Display order is MSB-first; the wire is LSB-first. Getting it backwards
+;;; silently targets a different device rather than failing, so the round trip
+;;; is worth asserting in both directions.
 
 (test parse-mac-on-air-order
   ;; display MSB-first -> on-air LSB-first (the reverse). This is the exact

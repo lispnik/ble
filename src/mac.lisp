@@ -3,11 +3,11 @@
 ;;; BLE address byte order: on the wire an address is little-endian (LSB
 ;;; first); the conventional display form is big-endian (MSB first). Getting
 ;;; this backwards silently targets the wrong device, so parsing and
-;;; formatting live together here as one source of truth (used by the scanner,
-;;; the advertiser, and the CLI), with round-trip tests in the core suite.
+;;; formatting live together here as one source of truth, with round-trip tests
+;;; in the core suite.
 ;;;
-;;; Internally bledecode always holds addresses in ON-AIR (LSB-first) order --
-;;; that is what the crypto keystream and the HCI connection code expect.
+;;; Internally this library always holds addresses in ON-AIR (LSB-first)
+;;; order -- that is what HCI and the connection code expect.
 
 (defun format-mac (bytes)
   "Format a 6-byte BLE address in ON-AIR (LSB-first) order as a display-order

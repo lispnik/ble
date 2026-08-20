@@ -7,9 +7,6 @@
 ;;;   0x0036  LE Set Extended Advertising Parameters
 ;;;   0x0037  LE Set Extended Advertising Data
 ;;;   0x0039  LE Set Extended Advertising Enable
-;;;
-;;; sensor would broadcast: Flags + NUS UUID + 0x0292 manufacturer
-;;; record carrying an encrypted tPacket).
 
 ;;; --- HCI command OCFs ------------------------------------------------
 
@@ -20,7 +17,7 @@
 
 ;;; --- Helpers ---------------------------------------------------------
 
-;;; u16le-put already lives in scanner.lisp.
+;;; u16le-put and u24le-put live in octets.lisp.
 
 ;;; --- HCI advertising commands ---------------------------------------
 

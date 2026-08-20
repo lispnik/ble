@@ -6,10 +6,10 @@
 ;;; container is generic BLE; what a vendor puts inside one of them is not.
 ;;;
 ;;; Portable, and deliberately so. This is arithmetic over an octet vector
-;;; with no I/O in it, and the Swift parser needs it -- so if it lived with
-;;; the HCI socket code, the portable Swift system would have to depend on the
-;;; Linux-only one to read a packet out of a capture file. It belongs in
-;;; ble/core.
+;;; with no I/O in it, and a consumer's packet parser needs it -- so if it
+;;; lived with the HCI socket code, portable protocol code would have to
+;;; depend on the Linux-only system just to read a packet out of a capture
+;;; file. It belongs in ble/core.
 
 (defconstant +ad-type-manufacturer-specific-data+ #xFF)
 

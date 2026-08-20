@@ -2,10 +2,14 @@
 
 ;;; Central-side Nordic UART Service (NUS) client.
 ;;;
-;;; Unlike the rest of bledecode (which is connectionless: it scans and
-;;; broadcasts advertising packets), this opens a *connection* to a device
-;;; and talks GATT to it. Real Swift Sensors devices are Nordic-based and
-;;; expose a NUS GATT server you can connect to and stream bytes over.
+;;; Unlike the scanning and advertising code, which is connectionless, this
+;;; opens a *connection* to a device and talks GATT to it. NUS is Nordic
+;;; Semiconductor's serial-over-GATT profile: any Nordic-based peripheral
+;;; exposing it can be connected to and streamed bytes over.
+;;;
+;;; The ATT machinery underneath it -- MTU exchange, discovery, CCCD
+;;; subscribe, notifications -- is generic and usable on its own; NUS is one
+;;; profile built on it, not the only thing it serves.
 ;;;
 ;;; We let the kernel BlueZ stack do the heavy lifting (LE connection +
 ;;; L2CAP) by opening an L2CAP socket bound to the ATT fixed channel
@@ -138,15 +142,14 @@ given, is an HCI adapter index: the L2CAP source is bound to that
 adapter's BD_ADDR so the connection is initiated from it specifically
 (otherwise the kernel routes via any adapter).
 
-NOTE: connect() drives the kernel's accept-list auto-connect (background
-scan on both 1M and Coded PHY, then initiate on a connectable advert).
-The Swift fleet DOES advertise connectable (measured: 41/41 devices,
-51/51 reports), yet connects to them still fail to establish -- btmon
-shows MGMT Connect Failed (status 0x0e) even at a 30s timeout. Likely
-Coded-PHY connection establishment on the Realtek RTL8761B dongles and/or
-the very low connectable-advert rate; not yet root-caused. Works fine
-against a connectable peer the controller can link with (e.g. a Nordic
-dev kit on 1M PHY)."
+NOTE: connect() drives the kernel's accept-list auto-connect -- a background
+scan on both 1M and Coded PHY, then initiate on a connectable advert -- and
+it does not always establish. Observed failures include peripherals that
+demonstrably advertise connectable but never link (MGMT Connect Failed,
+status 0x0e, even at a 30 s timeout), and controllers wedged such that this
+path hangs indefinitely while HCI-USER-ATT-CONNECT succeeds immediately.
+Neither is root-caused. When determinism matters, drive HCI yourself; see
+src/hci-conn.lisp."
   ;; Optionally bias the controller's PHY preference to 1M + Coded before
   ;; connecting (probe whether it helps reach Coded-only connectable peers).
   (when (and set-default-phy dev)

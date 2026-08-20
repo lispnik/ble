@@ -180,7 +180,7 @@ exactly what the nus-stream --set-default-phy experiment probes."
 
 ;;; Adapter enumeration ---------------------------------------------------
 ;;;
-;;; Which hciN is which MATTERS here and cannot be assumed: the Swift fleet
+;;; Which hciN is which MATTERS here and cannot be assumed: a device
 ;;; advertises on Coded PHY only, which the Pi's built-in UART radio cannot
 ;;; receive at all, and the kernel's hciN numbering drifts across reboots. So
 ;;; callers should pick an adapter by BUS (USB dongle) rather than by index.
@@ -239,9 +239,8 @@ busy or downed adapter -- failure just leaves ADDRESS NIL."
 (defun default-hci-dev (&optional adapters (prefer :usb))
   "Index of the adapter to use when the caller didn't name one.
 
-PREFER :USB picks the first USB dongle -- the right rule for the Swift fleet,
-whose Coded-PHY advertising the Pi's built-in UART radio cannot receive at
-all. PREFER :LOWEST picks the lowest index present, which is the right rule
+PREFER :USB picks the first USB dongle -- the right rule when you need the
+Coded PHY, which built-in radios generally cannot receive at all. PREFER :LOWEST picks the lowest index present, which is the right rule
 for an ordinary 1M-PHY peripheral and is not merely the lazy option: on the
 development Pi the built-in radio is the only one that can hear some devices,
 while both USB dongles report nothing.
@@ -421,10 +420,11 @@ responses, which is where many devices put their name."
 
 ;;; --- generic scanning --------------------------------------------------
 ;;;
-;;; SCAN-REPORTS is the vendor-neutral loop: every advertising report, to a
-;;; callback. It is named apart from BLE.SWIFT:SCAN on purpose -- #:ble.swift
-;;; USES #:ble, so a `scan' exported from here would be silently redefined by
-;;; the Swift one rather than shadowed.
+;;; SCAN-REPORTS rather than SCAN, and the extra word is load-bearing. A
+;;; consumer package that USEs #:ble and defines its own `scan' -- a
+;;; protocol-aware one that only dispatches its own devices -- would not
+;;; shadow a `scan' exported from here. It would silently redefine it. The
+;;; plainer name is left free for consumers to take.
 
 (defun scan-reports (callback &key (dev 0) seconds max-reports (extended t))
   "Run an LE scan on hci<DEV>, calling CALLBACK with each ADV-REPORT.

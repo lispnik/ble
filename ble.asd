@@ -6,18 +6,14 @@
 ;;;                   records, MAC byte order. No dependencies whatsoever.
 ;;;   ble             HCI sockets, adapter enumeration, LE scan, extended
 ;;;                   advertising, the NUS GATT client, and LE connections
-;;;                   over HCI_CHANNEL_USER. Adds cffi. Knows nothing about
-;;;                   Swift Sensors.
-;;;;;;
+;;;                   over HCI_CHANNEL_USER. Adds cffi; Linux/BlueZ only.
+;;;
 ;;; ble/core being genuinely dependency-free is load-bearing rather than
 ;;; tidy: it lets a consumer's protocol code -- and its test suite -- stay
 ;;; portable while still sharing this library's octet handling, MAC byte
-;;; order and advertising-data parsing. Both current consumers rely on that
-;;; to run their tests on a machine with no Bluetooth.
-;;;
-;;; Known consumers:
-;;;   bledecode  Swift Sensors sensor fleet   (github.com/lispnik/bledecode)
-;;;   ud18       ATORCH UD18 power meter      (github.com/lispnik/ud18)
+;;; order and advertising-data parsing. Its consumers rely on that to run
+;;; their test suites on machines with no Bluetooth. See the README for who
+;;; those are; the library itself has no business knowing.
 
 (asdf:defsystem #:ble/core
   :description "Portable BLE primitives: octets, advertising-data records, MAC byte order."

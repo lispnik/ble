@@ -4,8 +4,8 @@
 ;;;
 ;;; The kernel-assisted L2CAP-socket path (see nus.lisp) does not reliably
 ;;; initiate LE connections on this hardware, and never lets us pick the
-;;; initiating PHY. To reach the Coded-PHY-only Swift fleet we take an
-;;; adapter away from the kernel entirely:
+;;; initiating PHY. To reach a peripheral that advertises on the Coded PHY
+;;; only, we take an adapter away from the kernel entirely:
 ;;;
 ;;;   HCIDEVDOWN dev  ->  bind a HCI_CHANNEL_USER socket  ->  we ARE the host
 ;;;

@@ -4,10 +4,6 @@ A Bluetooth Low Energy library for SBCL on Linux: HCI sockets, adapter
 enumeration, LE scanning, extended advertising, and an ATT/GATT client that
 speaks over either of two transports.
 
-Extracted from [bledecode](https://github.com/lispnik/bledecode) once a second
-project needed the same stack. Before that it existed twice, in two
-repositories, sharing 118 definition names.
-
 ## Systems
 
 | System | Depends on | Contents |
@@ -16,10 +12,10 @@ repositories, sharing 118 definition names.
 | `ble` | `ble/core`, `cffi` | HCI sockets, adapters, LE scan, extended advertising, ATT/GATT, LE connections |
 | `ble/tests` | `ble/core`, `fiveam` | the portable suite |
 
-`ble/core` having **no dependencies at all** is load-bearing rather than tidy.
-It lets a consumer's protocol code — and its test suite — stay portable while
-still sharing this library's octet handling and AD parsing. Both current
-consumers rely on that to run their tests on a machine with no Bluetooth.
+`ble/core` having **no dependencies at all** protocol code — and its test suite
+— stay portable while still sharing this library's octet handling and AD
+parsing. Both current consumers rely on that to run their tests on a machine
+with no Bluetooth.
 
 ```sh
 make test    # portable suite; runs anywhere, including macOS
@@ -88,5 +84,4 @@ name.
 
 ## Consumers
 
-- [bledecode](https://github.com/lispnik/bledecode) — Swift Sensors fleet
 - [ud18](https://github.com/lispnik/ud18) — ATORCH UD18 power meter

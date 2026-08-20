@@ -2,14 +2,9 @@
 
 ;;; Octet vectors and little-endian integer readers.
 ;;;
-;;; These sat in the Swift crypto file, which was fine while there was one
-;;; package but is not once the library is split: the HCI layer needs them
-;;; too, and a generic BLE system that reached into a vendor protocol file
-;;; for MAKE-OCTETS would have the dependency exactly backwards.
-;;;
-;;; Portable. This file and src/mac.lisp are the whole of ble/core, which is
-;;; what lets the Swift protocol code -- and its test suite -- load with no
-;;; foreign dependencies at all.
+;;; Portable, and with no dependencies. That is what lets a consumer's
+;;; protocol code -- and its test suite -- share this library's octet
+;;; handling while still loading on a machine with no Bluetooth stack.
 
 (deftype octet () '(unsigned-byte 8))
 (deftype octets () '(simple-array octet (*)))
@@ -45,12 +40,6 @@
 (defun s32-le (vec offset)
   (let ((u (u32-le vec offset)))
     (if (logbitp 31 u) (- u #x100000000) u)))
-
-;;; Encryption -------------------------------------------------------------
-;;;
-;;; The Swift Sensors firmware (packetizer.c) leaves the first three bytes
-;;; of the advertising payload (size, version, sequence) as plaintext and
-;;; XORs every following byte with a keystream. The keystream is built one
 
 ;;; Little-endian writers ---------------------------------------------------
 
