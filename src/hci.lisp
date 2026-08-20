@@ -1,0 +1,484 @@
+(in-package #:ble)
+
+;;; Raw HCI: sockets, controller commands, adapter enumeration, LE
+;;; scanning, and advertising-report parsing.
+;;;
+;;; Uses a raw HCI socket (AF_BLUETOOTH, SOCK_RAW, BTPROTO_HCI) to send
+;;; LE scan commands directly to the controller and read advertising
+;;; reports back. Targets Linux/BlueZ on a Raspberry Pi.
+;;;
+;;; The firmware (radio/advertising.c) enables extended advertising with a
+;;; configurable primary PHY (1M or Coded), so we configure extended LE
+;;; scanning on both PHYs to be safe.
+;;;
+;;; Permissions: the SBCL binary needs CAP_NET_RAW + CAP_NET_ADMIN. Either
+;;;   sudo setcap 'cap_net_raw,cap_net_admin+eip' $(readlink -f $(which sbcl))
+;;; or run as root.
+
+;;; Local helpers --------------------------------------------------------
+
+;;; FORMAT-MAC now lives in the portable core (src/mac.lisp) alongside
+;;; PARSE-MAC, so both byte-order conversions share one tested source.
+
+;;; HCI constants --------------------------------------------------------
+
+(defconstant +sol-hci+            0)
+(defconstant +hci-filter+         2)
+(defconstant +hci-channel-raw+    0)
+(defconstant +hci-channel-user+   1)
+
+(defconstant +hci-cmd-pkt+        #x01)
+(defconstant +hci-event-pkt+      #x04)
+(defconstant +hci-le-meta-evt+    #x3E)
+
+(defconstant +sub-le-adv-report+      #x02)
+(defconstant +sub-le-ext-adv-report+  #x0D)
+
+(defconstant +ogf-le+ #x08)
+(defconstant +ocf-le-set-extended-scan-parameters+ #x0041)
+(defconstant +ocf-le-set-extended-scan-enable+     #x0042)
+
+(defconstant +ogf-info-params+    #x04)
+(defconstant +ocf-read-bd-addr+   #x0009)
+(defconstant +ocf-le-set-default-phy+ #x0031)
+(defconstant +hci-cmd-complete-evt+ #x0E)
+
+(defun hci-opcode (ogf ocf)
+  (logior ocf (ash ogf 10)))
+
+;;; HCI socket -----------------------------------------------------------
+
+(defstruct hci-socket fd dev)
+
+(defun set-hci-filter (fd)
+  "Allow event packets and all event codes through. struct hci_filter is
+{uint32 type_mask; uint32 event_mask[2]; uint16 opcode;} which the kernel
+sizes as 16 bytes (2 bytes of trailing pad), and setsockopt rejects any
+other length with EINVAL."
+  (cffi:with-foreign-object (filt :unsigned-char 16)
+    (loop for i from 0 below 12 do
+      (setf (cffi:mem-aref filt :unsigned-char i) #xFF))
+    (loop for i from 12 below 16 do
+      (setf (cffi:mem-aref filt :unsigned-char i) 0))
+    (check-syscall (%setsockopt fd +sol-hci+ +hci-filter+ filt 16)
+                   "setsockopt HCI_FILTER")))
+
+(defun open-hci-socket (&key (dev 0) (channel +hci-channel-raw+))
+  "Open and bind a raw HCI socket on hci<DEV>. CHANNEL is +hci-channel-raw+
+(default, shares the adapter with the kernel) or +hci-channel-user+
+(exclusive control; the adapter must be DOWN first -- see
+OPEN-HCI-USER-SOCKET in hci-conn.lisp)."
+  (let ((fd (check-syscall
+             (%socket +af-bluetooth+ +sock-raw+ +btproto-hci+) "socket")))
+    (handler-case
+        ;; struct sockaddr_hci { uint16 family; uint16 dev; uint16 channel; }
+        (cffi:with-foreign-object (sa :unsigned-char 8)
+          (loop for i below 8 do (setf (cffi:mem-aref sa :unsigned-char i) 0))
+          (setf (cffi:mem-aref sa :unsigned-char 0) (logand +af-bluetooth+ #xFF)
+                (cffi:mem-aref sa :unsigned-char 1) (logand (ash +af-bluetooth+ -8) #xFF)
+                (cffi:mem-aref sa :unsigned-char 2) (logand dev #xFF)
+                (cffi:mem-aref sa :unsigned-char 3) (logand (ash dev -8) #xFF)
+                (cffi:mem-aref sa :unsigned-char 4) channel
+                (cffi:mem-aref sa :unsigned-char 5) 0)
+          (check-syscall (%bind fd sa 6) "bind")
+          (when (= channel +hci-channel-raw+)
+            (set-hci-filter fd))
+          (make-hci-socket :fd fd :dev dev))
+      (error (c)
+        (%close fd)
+        (error c)))))
+
+(defun close-hci-socket (sock)
+  (when (hci-socket-fd sock)
+    (%close (hci-socket-fd sock))
+    (setf (hci-socket-fd sock) nil)))
+
+(defun send-hci-command (sock ogf ocf params)
+  "Build and write a single HCI command packet to the controller."
+  (let* ((opcode (hci-opcode ogf ocf))
+         (params (coerce-octets params))
+         (plen (length params))
+         (pkt (make-octets (+ 4 plen))))
+    (setf (aref pkt 0) +hci-cmd-pkt+)
+    (u16le-put pkt 1 opcode)
+    (setf (aref pkt 3) plen)
+    (replace pkt params :start1 4)
+    (cffi:with-foreign-object (buf :unsigned-char (length pkt))
+      (bytes-to-foreign pkt buf)
+      (check-syscall (%write (hci-socket-fd sock) buf (length pkt)) "write"))))
+
+(defparameter *hci-read-buffer-size* 2048)
+
+(defun read-hci-packet (sock &key timeout-ms)
+  "Read one HCI packet. Returns an octet vector, or NIL on EOF or timeout.
+
+With TIMEOUT-MS the read is bounded by a poll first, which is what lets a
+caller stop scanning on a deadline instead of blocking until the next packet
+happens to arrive. Without it the read blocks, which is the historic
+behaviour and still what an endless scan loop wants."
+  (when (and timeout-ms (not (fd-readable-p (hci-socket-fd sock) timeout-ms)))
+    (return-from read-hci-packet nil))
+  (cffi:with-foreign-object (buf :unsigned-char *hci-read-buffer-size*)
+    (let ((n (%read (hci-socket-fd sock) buf *hci-read-buffer-size*)))
+      (cond ((= n 0) nil)
+            ((< n 0) (error "read failed: ~A (errno ~D)"
+                            (%strerror (errno)) (errno)))
+            (t (foreign-to-bytes buf n))))))
+
+(defun hci-read-bd-addr (&key (dev 0))
+  "Read the local BD_ADDR of hci<DEV> via the HCI Read_BD_ADDR command.
+Returns a 6-byte octet vector in on-air byte order (LSB first) -- exactly
+the form needed to bind an L2CAP source address to this adapter."
+  (let ((sock (open-hci-socket :dev dev))
+        (opcode (hci-opcode +ogf-info-params+ +ocf-read-bd-addr+)))
+    (unwind-protect
+         (progn
+           (send-hci-command sock +ogf-info-params+ +ocf-read-bd-addr+ #())
+           (loop
+             (let ((pkt (read-hci-packet sock)))
+               (unless pkt (error "no response to Read_BD_ADDR on hci~D" dev))
+               ;; Command Complete: type(0x04) evt(0x0E) plen ncmd opcode(2)
+               ;; status(1) bd_addr(6)  -> bd_addr at offset 7..12
+               (when (and (>= (length pkt) 13)
+                          (= (aref pkt 0) +hci-event-pkt+)
+                          (= (aref pkt 1) +hci-cmd-complete-evt+)
+                          (= (u16-le pkt 4) opcode))
+                 (let ((status (aref pkt 6)))
+                   (unless (zerop status)
+                     (error "Read_BD_ADDR on hci~D failed (status 0x~2,'0X)" dev status))
+                   (return (subseq pkt 7 13)))))))
+      (close-hci-socket sock))))
+
+(defun hci-set-default-phy (&key (dev 0) (tx-phys #x05) (rx-phys #x05))
+  "Issue HCI LE Set Default PHY on hci<DEV>. TX-PHYS / RX-PHYS are bitmasks
+(bit0 = 1M, bit1 = 2M, bit2 = Coded); default #x05 = 1M + Coded. all_phys
+is 0 (we name both TX and RX explicitly). Returns T on success.
+
+This sets the controller's default PHY preference for the PHY Update
+procedure on connections. Whether it also influences the *initiating* PHY
+for connection establishment is controller/kernel dependent -- which is
+exactly what the nus-stream --set-default-phy experiment probes."
+  (let ((sock (open-hci-socket :dev dev))
+        (opcode (hci-opcode +ogf-le+ +ocf-le-set-default-phy+)))
+    (unwind-protect
+         (progn
+           (send-hci-command sock +ogf-le+ +ocf-le-set-default-phy+
+                             (vector 0 tx-phys rx-phys))
+           (loop
+             (let ((pkt (read-hci-packet sock)))
+               (unless pkt (error "no response to LE Set Default PHY on hci~D" dev))
+               (when (and (>= (length pkt) 7)
+                          (= (aref pkt 0) +hci-event-pkt+)
+                          (= (aref pkt 1) +hci-cmd-complete-evt+)
+                          (= (u16-le pkt 4) opcode))
+                 (let ((status (aref pkt 6)))
+                   (unless (zerop status)
+                     (error "LE Set Default PHY on hci~D failed (status 0x~2,'0X)"
+                            dev status))
+                   (return t))))))
+      (close-hci-socket sock))))
+
+;;; Adapter enumeration ---------------------------------------------------
+;;;
+;;; Which hciN is which MATTERS here and cannot be assumed: the Swift fleet
+;;; advertises on Coded PHY only, which the Pi's built-in UART radio cannot
+;;; receive at all, and the kernel's hciN numbering drifts across reboots. So
+;;; callers should pick an adapter by BUS (USB dongle) rather than by index.
+;;;
+;;; Read from sysfs rather than via ioctl(HCIGETDEVLIST): no extra foreign
+;;; structs, works on a downed adapter, and needs no privileges. Linux only --
+;;; everywhere else this simply returns NIL.
+
+(defstruct hci-adapter
+  index        ; N in hciN
+  bus          ; :usb | :serial | :other
+  product      ; USB product string, or NIL
+  address)     ; BD_ADDR (on-air order) if it could be read, else NIL
+
+(defun hci-adapter-usb-p (a) (eq (hci-adapter-bus a) :usb))
+
+(defparameter +sysfs-bluetooth+ #p"/sys/class/bluetooth/")
+
+(defun %adapter-bus (index)
+  "Bus this adapter hangs off, from the subsystem symlink of its device."
+  (let ((link (ignore-errors
+               (truename (merge-pathnames
+                          (format nil "hci~D/device/subsystem" index)
+                          +sysfs-bluetooth+)))))
+    (cond ((null link) :other)
+          ((search "usb" (namestring link)) :usb)
+          ((search "serial" (namestring link)) :serial)
+          (t :other))))
+
+(defun %adapter-product (index)
+  "USB product string, read from the parent of the interface directory (the
+interface itself doesn't carry one). NIL for non-USB or unreadable."
+  (let ((dev (ignore-errors
+              (truename (merge-pathnames (format nil "hci~D/device/" index)
+                                         +sysfs-bluetooth+)))))
+    (when dev
+      (let ((file (merge-pathnames "../product" dev)))
+        (ignore-errors
+         (string-trim '(#\Space #\Newline #\Return)
+                      (uiop:read-file-string file)))))))
+
+(defun list-hci-adapters (&key (max-index 15) (read-address t))
+  "Enumerate local HCI adapters, lowest index first. READ-ADDRESS also asks
+each controller for its BD_ADDR, which needs CAP_NET_RAW and can fail on a
+busy or downed adapter -- failure just leaves ADDRESS NIL."
+  (loop for i from 0 to max-index
+        when (probe-file (merge-pathnames (format nil "hci~D/uevent" i)
+                                          +sysfs-bluetooth+))
+          collect (make-hci-adapter
+                   :index i
+                   :bus (%adapter-bus i)
+                   :product (%adapter-product i)
+                   :address (and read-address
+                                 (ignore-errors (hci-read-bd-addr :dev i))))))
+
+(defun default-hci-dev (&optional adapters (prefer :usb))
+  "Index of the adapter to use when the caller didn't name one.
+
+PREFER :USB picks the first USB dongle -- the right rule for the Swift fleet,
+whose Coded-PHY advertising the Pi's built-in UART radio cannot receive at
+all. PREFER :LOWEST picks the lowest index present, which is the right rule
+for an ordinary 1M-PHY peripheral and is not merely the lazy option: on the
+development Pi the built-in radio is the only one that can hear some devices,
+while both USB dongles report nothing.
+
+Which rule is correct depends on the device you are looking for, so it is a
+parameter rather than a default someone has to remember to override."
+  (let ((adapters (sort (copy-list (or adapters (list-hci-adapters :read-address nil)))
+                        #'< :key #'hci-adapter-index)))
+    (ecase prefer
+      (:usb    (let ((usb (find-if #'hci-adapter-usb-p adapters)))
+                 (cond (usb      (hci-adapter-index usb))
+                       (adapters (hci-adapter-index (first adapters)))
+                       (t 0))))
+      (:lowest (if adapters (hci-adapter-index (first adapters)) 0)))))
+
+(defun hci-adapter-label (a &key (address t))
+  "Human-readable one-liner for an adapter, e.g.
+\"hci1 - TP-TP+ Bluetooth USB Adapter (USB) A1:B2:C3:D4:E5:F6\".
+
+With :ADDRESS NIL the BD_ADDR is left off. That form is for UI widgets: the
+address roughly doubles the width, and in the web GUI's adapter picker it was
+wide enough to wrap the whole control bar onto a second row."
+  (format nil "hci~D - ~A (~A)~@[ ~A~]"
+          (hci-adapter-index a)
+          (or (hci-adapter-product a)
+              (case (hci-adapter-bus a)
+                (:serial "built-in UART radio")
+                (t "adapter")))
+          (case (hci-adapter-bus a) (:usb "USB") (:serial "UART") (t "?"))
+          (and address (hci-adapter-address a)
+               (format-mac (hci-adapter-address a)))))
+
+;;; Advertising-report parsing -------------------------------------------
+
+(defun decode-rssi (byte)
+  "Signed dBm from an HCI RSSI byte, or NIL when the controller says it has
+none. 0x7F is the spec's \"RSSI is not available\" sentinel; taken literally
+it would render as a nonsensical +127 dBm, and every consumer here already
+handles a missing RSSI (replay has none either)."
+  (let ((v (if (>= byte 128) (- byte 256) byte)))
+    (unless (= v 127) v)))
+
+(defstruct adv-report
+  event-type  ; uint8 (legacy) or uint16 bitfield (extended)
+  addr-type   ; 0 = public, 1 = random, ...
+  address     ; 6-byte octet vector, on-air byte order (matches what the
+              ; firmware passes to ble_gap_addr_t for encryption)
+  data        ; advertising data blob (sequence of AD records)
+  rssi)       ; signed dBm or NIL
+
+(defun parse-le-adv-report (params)
+  "Legacy LE Advertising Report sub-event (0x02). Per-report fixed = 9 bytes
+plus data; RSSIs (one signed byte per report) come at the very end."
+  (let ((num (aref params 0))
+        (offset 1)
+        (reports nil))
+    (dotimes (_ num)
+      (let* ((event-type (aref params offset))
+             (addr-type  (aref params (+ offset 1)))
+             (address    (subseq params (+ offset 2) (+ offset 8)))
+             (data-len   (aref params (+ offset 8)))
+             (data       (subseq params (+ offset 9) (+ offset 9 data-len))))
+        (push (make-adv-report :event-type event-type
+                               :addr-type addr-type
+                               :address address
+                               :data data)
+              reports)
+        (incf offset (+ 9 data-len))))
+    (let ((reports (nreverse reports)))
+      (loop for r in reports for i from 0
+            for byte = (aref params (+ offset i))
+            do (setf (adv-report-rssi r) (decode-rssi byte)))
+      reports)))
+
+(defun parse-le-ext-adv-report (params)
+  "Extended LE Advertising Report sub-event (0x0D). Per-report fixed = 24
+bytes including RSSI inline, then data."
+  (let ((num (aref params 0))
+        (offset 1)
+        (reports nil))
+    (dotimes (_ num)
+      (let* ((event-type (u16-le params offset))
+             (addr-type  (aref params (+ offset 2)))
+             (address    (subseq params (+ offset 3) (+ offset 9)))
+             (rssi       (decode-rssi (aref params (+ offset 13))))
+             (data-len   (aref params (+ offset 23)))
+             (data       (subseq params (+ offset 24) (+ offset 24 data-len))))
+        (push (make-adv-report :event-type event-type
+                               :addr-type addr-type
+                               :address address
+                               :data data
+                               :rssi rssi)
+              reports)
+        (incf offset (+ 24 data-len))))
+    (nreverse reports)))
+
+;;; Extended scan setup --------------------------------------------------
+;;;
+;;; LE Set Extended Scan Parameters (Core spec v5.0, Vol 4, Part E §7.8.64):
+;;;   own_addr_type       1 byte
+;;;   scan_filter_policy  1 byte
+;;;   scanning_phys       1 byte (bit 0 = 1M, bit 2 = Coded)
+;;;   per enabled PHY:
+;;;     scan_type         1 byte (0 passive, 1 active)
+;;;     scan_interval     2 bytes (units of 0.625 ms)
+;;;     scan_window       2 bytes
+;;;
+;;; LE Set Extended Scan Enable (§7.8.65):
+;;;   enable              1 byte
+;;;   filter_duplicates   1 byte
+;;;   duration            2 bytes (0 = until disabled)
+;;;   period              2 bytes
+
+(defun start-extended-scan (sock)
+  (let ((params (make-octets 13)))
+    (setf (aref params 0) 0          ; own_addr_type = public
+          (aref params 1) 0          ; scan_filter_policy = accept all
+          (aref params 2) #x05)      ; scanning_phys = 1M | Coded
+    ;; 1M PHY: active scan, 10 ms interval, 10 ms window
+    (setf (aref params 3) 1)
+    (u16le-put params 4 #x0010)
+    (u16le-put params 6 #x0010)
+    ;; Coded PHY: same
+    (setf (aref params 8) 1)
+    (u16le-put params 9 #x0010)
+    (u16le-put params 11 #x0010)
+    (send-hci-command sock +ogf-le+ +ocf-le-set-extended-scan-parameters+ params))
+  (let ((params (make-octets 6)))
+    (setf (aref params 0) 1)         ; enable = 1, others = 0
+    (send-hci-command sock +ogf-le+ +ocf-le-set-extended-scan-enable+ params)))
+
+(defconstant +ocf-le-set-scan-parameters+ #x000B)
+(defconstant +ocf-le-set-scan-enable+     #x000C)
+
+(defun start-le-scan (sock &key (active t) (interval #x0010) (window #x0010))
+  "Legacy LE Set Scan Parameters + Set Scan Enable (4.0).
+
+Deliberately kept alongside the extended form. The extended commands are the
+only way to scan the Coded PHY, but they are not implemented by every
+controller -- notably some built-in radios -- and an ordinary legacy
+advertiser on the 1M PHY needs nothing more than this. ACTIVE requests scan
+responses, which is where many devices put their name."
+  (let ((params (make-octets 7)))
+    (setf (aref params 0) (if active 1 0))
+    (u16le-put params 1 interval)
+    (u16le-put params 3 window)
+    (setf (aref params 5) 0             ; own address type: public
+          (aref params 6) 0)            ; filter policy: accept all
+    (send-hci-command sock +ogf-le+ +ocf-le-set-scan-parameters+ params))
+  (let ((params (make-octets 2)))
+    (setf (aref params 0) 1             ; enable
+          (aref params 1) 0)            ; do not filter duplicates
+    (send-hci-command sock +ogf-le+ +ocf-le-set-scan-enable+ params)))
+
+(defun stop-le-scan (sock)
+  (ignore-errors
+   (send-hci-command sock +ogf-le+ +ocf-le-set-scan-enable+ (make-octets 2))))
+
+(defun stop-extended-scan (sock)
+  (ignore-errors
+   (send-hci-command sock +ogf-le+ +ocf-le-set-extended-scan-enable+
+                     (make-octets 6))))
+
+;;; --- advertising reports out of an HCI packet -------------------------
+
+(defun reports-from-packet (pkt)
+  "Extract any LE Advertising Reports embedded in an HCI packet."
+  (when (and (>= (length pkt) 4)
+             (= (aref pkt 0) +hci-event-pkt+)
+             (= (aref pkt 1) +hci-le-meta-evt+))
+    (let* ((param-len (aref pkt 2))
+           (subevt    (aref pkt 3))
+           (params    (subseq pkt 4 (+ 3 param-len))))
+      (cond ((= subevt +sub-le-adv-report+)     (parse-le-adv-report params))
+            ((= subevt +sub-le-ext-adv-report+) (parse-le-ext-adv-report params))
+            (t nil)))))
+
+;;; --- generic scanning --------------------------------------------------
+;;;
+;;; SCAN-REPORTS is the vendor-neutral loop: every advertising report, to a
+;;; callback. It is named apart from BLE.SWIFT:SCAN on purpose -- #:ble.swift
+;;; USES #:ble, so a `scan' exported from here would be silently redefined by
+;;; the Swift one rather than shadowed.
+
+(defun scan-reports (callback &key (dev 0) seconds max-reports (extended t))
+  "Run an LE scan on hci<DEV>, calling CALLBACK with each ADV-REPORT.
+
+Stops after SECONDS or MAX-REPORTS, whichever comes first; with neither, runs
+until CALLBACK performs a non-local exit. EXTENDED selects the 5.0 scan
+commands (needed for Coded PHY) or the legacy 4.0 pair. Returns the number of
+reports delivered."
+  (let ((sock (open-hci-socket :dev dev))
+        (deadline (when seconds
+                    (+ (get-internal-real-time)
+                       (round (* seconds internal-time-units-per-second)))))
+        (count 0))
+    (unwind-protect
+         (progn
+           (if extended (start-extended-scan sock) (start-le-scan sock))
+           (loop
+             (when (and deadline (>= (get-internal-real-time) deadline)) (return))
+             (dolist (r (reports-from-packet (read-hci-packet sock :timeout-ms 250)))
+               (funcall callback r)
+               (incf count)
+               (when (and max-reports (>= count max-reports)) (return)))
+             (when (and max-reports (>= count max-reports)) (return))))
+      (if extended (stop-extended-scan sock) (stop-le-scan sock))
+      (close-hci-socket sock))
+    count))
+
+(defstruct discovered
+  "One device seen during DISCOVER, merged across all of its reports."
+  address addr-type name rssi service-uuids)
+
+(defun discover (&key (dev 0) (seconds 8) (extended t) filter)
+  "Scan for SECONDS and return a list of DISCOVERED devices, strongest first.
+
+Reports for one address are merged, which is the point: a name learned from a
+scan response arrives in a different report from the advertisement carrying
+the service UUIDs, and a caller that treats reports as devices sees each
+device several times, differently, and never completely.
+
+FILTER, if given, is a predicate on a DISCOVERED."
+  (let ((table (make-hash-table :test #'equalp)))
+    (scan-reports
+     (lambda (r)
+       (let* ((key (adv-report-address r))
+              (d (or (gethash key table)
+                     (setf (gethash key table)
+                           (make-discovered :address key
+                                            :addr-type (adv-report-addr-type r))))))
+         (let ((name (adv-local-name (adv-report-data r))))
+           (when (and name (plusp (length name))) (setf (discovered-name d) name)))
+         (dolist (u (adv-service-uuids-16 (adv-report-data r)))
+           (pushnew u (discovered-service-uuids d)))
+         (when (adv-report-rssi r) (setf (discovered-rssi d) (adv-report-rssi r)))))
+     :dev dev :seconds seconds :extended extended)
+    (let ((all (sort (loop for d being the hash-values of table collect d)
+                     #'> :key (lambda (d) (or (discovered-rssi d) -999)))))
+      (if filter (remove-if-not filter all) all))))
