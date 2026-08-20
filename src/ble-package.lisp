@@ -66,6 +66,13 @@
           set-extended-adv-parameters
           set-extended-adv-data
           set-extended-adv-enable
+          set-adv-parameters
+          set-adv-data
+          set-scan-response-data
+          set-adv-enable
+          +adv-ind+
+          +adv-scan-ind+
+          +adv-nonconn-ind+
           ;; GATT: UUIDs, characteristics, ATT operations
           uuid16
           uuid-string
@@ -83,7 +90,19 @@
           att-request
           att-error-p
           att-exchange-mtu
+          att-discover-services
           att-discover-characteristics
+          att-discover-descriptors
+          att-find-service
+          find-service-by-uuid
+          gatt-service
+          gatt-service-p
+          gatt-service-start
+          gatt-service-end
+          gatt-service-uuid
+          gatt-service-uuid-string
+          +gatt-primary-service+
+          +gatt-secondary-service+
           att-find-cccd
           att-read-value
           att-read-long-value

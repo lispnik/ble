@@ -1,12 +1,24 @@
 (in-package #:ble)
 
-;;; Advertising side of the HCI controller.
+;;; Advertising side of the HCI controller, in both forms.
 ;;;
-;;; Four LE Controller commands (OGF=0x08) drive an advertising set:
+;;; Extended (5.0), which drives an advertising set and is the only way to
+;;; transmit on the Coded PHY:
 ;;;   0x0035  LE Set Advertising Set Random Address
 ;;;   0x0036  LE Set Extended Advertising Parameters
 ;;;   0x0037  LE Set Extended Advertising Data
 ;;;   0x0039  LE Set Extended Advertising Enable
+;;;
+;;; Legacy (4.0), implemented by every LE controller ever made:
+;;;   0x0006  LE Set Advertising Parameters
+;;;   0x0008  LE Set Advertising Data
+;;;   0x0009  LE Set Scan Response Data
+;;;   0x000A  LE Set Advertising Enable
+;;;
+;;; Both are here for the same reason both scan paths are: extended reaches
+;;; further, legacy reaches controllers that never implemented extended. A
+;;; library that offered only extended could scan on a radio it could not
+;;; advertise from, which was the state of this file until now.
 
 ;;; --- HCI command OCFs ------------------------------------------------
 
@@ -14,6 +26,16 @@
 (defconstant +ocf-le-set-extended-adv-parameters+  #x0036)
 (defconstant +ocf-le-set-extended-adv-data+        #x0037)
 (defconstant +ocf-le-set-extended-adv-enable+      #x0039)
+
+(defconstant +ocf-le-set-adv-parameters+          #x0006)
+(defconstant +ocf-le-set-adv-data+                #x0008)
+(defconstant +ocf-le-set-scan-response-data+      #x0009)
+(defconstant +ocf-le-set-adv-enable+              #x000A)
+
+;;; Legacy advertising types (LE Set Advertising Parameters, adv_type).
+(defconstant +adv-ind+          #x00 "Connectable and scannable undirected.")
+(defconstant +adv-scan-ind+     #x02 "Scannable undirected; not connectable.")
+(defconstant +adv-nonconn-ind+  #x03 "Neither connectable nor scannable.")
 
 ;;; --- Helpers ---------------------------------------------------------
 
@@ -79,3 +101,70 @@ lowest power)."
           (aref params 2) (logand handle #xFF))
     ;; bytes 3-4: duration = 0 (continuous), byte 5: max events = 0
     (send-hci-command sock +ogf-le+ +ocf-le-set-extended-adv-enable+ params)))
+
+;;; --- legacy advertising ------------------------------------------------
+
+(defun %adv-parameters-params (interval-min interval-max adv-type
+                               own-addr-type peer-addr-type peer-addr
+                               channel-map filter-policy)
+  "The 15-octet parameter block for LE Set Advertising Parameters."
+  (let ((params (make-octets 15)))
+    (u16le-put params 0 interval-min)          ; units of 0.625 ms
+    (u16le-put params 2 interval-max)
+    (setf (aref params 4) adv-type
+          (aref params 5) own-addr-type
+          (aref params 6) peer-addr-type)
+    (replace params (coerce-octets peer-addr) :start1 7 :end1 13)
+    (setf (aref params 13) channel-map
+          (aref params 14) filter-policy)
+    params))
+
+(defun set-adv-parameters (sock &key (interval-min #x00A0) (interval-max #x00A0)
+                                     (adv-type +adv-ind+) (own-addr-type 0)
+                                     (peer-addr-type 0) (peer-addr #(0 0 0 0 0 0))
+                                     (channel-map #x07) (filter-policy 0))
+  "LE Set Advertising Parameters (legacy).
+
+Intervals are in units of 0.625 ms; the default 0x00A0 is 100 ms. CHANNEL-MAP
+defaults to all three primary advertising channels (0x07) -- narrowing it is
+occasionally useful for testing but mostly just makes you harder to find.
+
+Must be issued while advertising is disabled; the controller rejects it
+otherwise, which is the usual reason this returns a non-zero status."
+  (send-hci-command sock +ogf-le+ +ocf-le-set-adv-parameters+
+                    (%adv-parameters-params interval-min interval-max adv-type
+                                            own-addr-type peer-addr-type peer-addr
+                                            channel-map filter-policy)))
+
+(defun %adv-data-params (data)
+  "The 32-octet block both LE Set Advertising Data and LE Set Scan Response
+Data take: a significant-length byte, then 31 octets, zero-padded.
+
+The fixed width is the point -- the command is always 32 octets on the wire
+however little of it means anything, and a short buffer is rejected rather
+than padded for you."
+  (let ((data (coerce-octets data))
+        (params (make-octets 32)))
+    (when (> (length data) 31)
+      (error "advertising data is ~D octets; the legacy limit is 31"
+             (length data)))
+    (setf (aref params 0) (length data))
+    (replace params data :start1 1)
+    params))
+
+(defun set-adv-data (sock data)
+  "LE Set Advertising Data (legacy). DATA is up to 31 octets of AD records."
+  (send-hci-command sock +ogf-le+ +ocf-le-set-adv-data+ (%adv-data-params data)))
+
+(defun set-scan-response-data (sock data)
+  "LE Set Scan Response Data (legacy): what an active scanner gets back when
+it asks. Up to 31 octets, and a second budget of them -- putting the name
+here rather than in the advertisement is how devices fit both."
+  (send-hci-command sock +ogf-le+ +ocf-le-set-scan-response-data+
+                    (%adv-data-params data)))
+
+(defun set-adv-enable (sock enable)
+  "LE Set Advertising Enable (legacy)."
+  (let ((params (make-octets 1)))
+    (setf (aref params 0) (if enable 1 0))
+    (send-hci-command sock +ogf-le+ +ocf-le-set-adv-enable+ params)))

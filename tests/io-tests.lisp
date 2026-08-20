@@ -178,3 +178,63 @@ a replayed capture has none either."
   (let ((a (ble::make-hci-adapter :index 0 :bus :serial :product nil :address nil)))
     (is (search "built-in UART radio" (ble:hci-adapter-label a)))
     (is (search "(UART)" (ble:hci-adapter-label a)))))
+
+;;; --- legacy advertising parameters -------------------------------------
+
+(test adv-parameter-block-is-15-octets-with-fields-in-place
+  "A wrong length or a shifted field is rejected by the controller with a
+status byte that says nothing about which one moved."
+  (let* ((peer (ble:parse-mac "D0:D1:D2:D3:D4:D5"))
+         (p (ble::%adv-parameters-params #x00A0 #x00B0 ble:+adv-nonconn-ind+
+                                         1 0 peer #x07 0)))
+    (is (= 15 (length p)))
+    (is (= #x00A0 (ble:u16-le p 0)) "interval min, little-endian")
+    (is (= #x00B0 (ble:u16-le p 2)) "interval max")
+    (is (= #x03 (aref p 4)) "adv type")
+    (is (= 1 (aref p 5)) "own address type")
+    (is (equalp peer (subseq p 7 13)) "peer address, on-air order")
+    (is (= #x07 (aref p 13)) "all three primary channels")))
+
+(test adv-data-block-is-always-32-octets-and-zero-padded
+  "The command is fixed width however little of it means anything."
+  (let ((p (ble::%adv-data-params (hex->octets "020106"))))
+    (is (= 32 (length p)))
+    (is (= 3 (aref p 0)) "significant length comes first")
+    (is (equalp (hex->octets "020106") (subseq p 1 4)))
+    (is (every #'zerop (subseq p 4)) "the rest is padding"))
+  (let ((p (ble::%adv-data-params (ble:make-octets 31))))
+    (is (= 32 (length p)))
+    (is (= 31 (aref p 0)) "31 octets is the legal maximum")))
+
+(test adv-data-over-31-octets-is-refused-not-truncated
+  "Silently dropping the tail would put a malformed AD record on the air,
+which a scanner reports as a device with no name rather than as an error."
+  (signals error (ble::%adv-data-params (ble:make-octets 32))))
+
+;;; --- service discovery --------------------------------------------------
+
+(test service-uuid-string-round-trips
+  (let ((s (ble::make-gatt-service :start 1 :end 9 :uuid (ble:uuid16 #x1800))))
+    (is (= 1 (ble:gatt-service-start s)))
+    (is (= 9 (ble:gatt-service-end s)))
+    (is (string= "1800" (ble:gatt-service-uuid-string s)))))
+
+(test find-service-by-uuid-matches-on-wire-order
+  (let* ((gap (ble::make-gatt-service :start 1 :end 9 :uuid (ble:uuid16 #x1800)))
+         (ffe0 (ble::make-gatt-service :start 10 :end 14 :uuid (ble:uuid16 #xFFE0)))
+         (services (list gap ffe0)))
+    (is (eq ffe0 (ble:find-service-by-uuid services (ble:uuid16 #xFFE0))))
+    (is (eq gap (ble:find-service-by-uuid services (ble:uuid16 #x1800))))
+    (is (null (ble:find-service-by-uuid services (ble:uuid16 #x180F))))))
+
+(test characteristic-discovery-defaults-to-the-whole-handle-space
+  "Membership is the handle range and nothing else -- ATT has no other notion
+of which service a characteristic belongs to, so the range has to reach the
+request. Defaulting to 1..FFFF keeps the common call unchanged."
+  (let ((ll (sb-introspect:function-lambda-list 'ble:att-discover-characteristics)))
+    (is (equal '(fd &key (start 1) (end 65535))
+               (mapcar (lambda (x) (if (consp x) (list (intern (string (first x)))
+                                                       (second x))
+                                       (intern (string x))))
+                       ll))
+        "signature drifted: ~A" ll)))

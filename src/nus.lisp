@@ -48,6 +48,10 @@
 (defconstant +att-exchange-mtu-rsp+  #x03)
 (defconstant +att-find-info-req+     #x04)
 (defconstant +att-find-info-rsp+     #x05)
+(defconstant +att-find-by-type-value-req+ #x06)
+(defconstant +att-find-by-type-value-rsp+ #x07)
+(defconstant +att-read-by-group-type-req+ #x10)
+(defconstant +att-read-by-group-type-rsp+ #x11)
 (defconstant +att-read-req+          #x0A)
 (defconstant +att-read-rsp+          #x0B)
 (defconstant +att-read-blob-req+     #x0C)
@@ -65,6 +69,8 @@
 (defconstant +att-err-invalid-offset+     #x07)
 (defconstant +att-err-attr-not-long+      #x0B)
 
+(defconstant +gatt-primary-service+     #x2800)
+(defconstant +gatt-secondary-service+   #x2801)
 (defconstant +gatt-characteristic-decl+ #x2803)
 (defconstant +gatt-cccd+                #x2902)
 
@@ -475,15 +481,129 @@ an HCI-CONN whose adapter has to be handed back to the kernel."
   (cond ((integerp chan) (%close chan))
         (chan (hci-conn-close chan))))
 
-(defun att-discover-characteristics (fd)
-  "Walk Read-By-Type (0x2803) over the whole handle space. Returns a list of
-GATT-CHAR, in handle order."
-  (let ((chars nil) (start 1))
+
+;;; --- services ---------------------------------------------------------
+
+(defstruct gatt-service
+  "One service found by discovery: the handle range it owns, and its UUID in
+ATT wire order.
+
+The range is the useful part. Characteristics belong to whichever service
+encloses them, and ATT will not tell you that -- you discover characteristics
+WITHIN a range, which is why ATT-DISCOVER-CHARACTERISTICS takes one."
+  start end uuid)
+
+(defun gatt-service-uuid-string (s) (uuid-string (gatt-service-uuid s)))
+
+(defun att-discover-services (chan &key (type +gatt-primary-service+))
+  "Walk Read By Group Type over the whole handle space. Returns a list of
+GATT-SERVICE in handle order.
+
+TYPE is +GATT-PRIMARY-SERVICE+ by default; pass +GATT-SECONDARY-SERVICE+ for
+the ones only meant to be included by others."
+  (let ((services nil) (start 1))
+    (loop
+      (let ((req (make-octets 7)))
+        (setf (aref req 0) +att-read-by-group-type-req+)
+        (u16le-put req 1 start)
+        (u16le-put req 3 #xFFFF)
+        (u16le-put req 5 type)
+        (let ((rsp (att-request chan req :expect +att-read-by-group-type-rsp+)))
+          (when (or (null rsp) (att-error-p rsp)
+                    (/= (aref rsp 0) +att-read-by-group-type-rsp+))
+            (return))
+          ;; opcode(1) each-len(1), then records of each-len octets:
+          ;;   start handle(2) end group handle(2) uuid(2 or 16)
+          (let ((each (aref rsp 1)) (i 2) (last 0))
+            (when (< each 6) (return))
+            (loop while (<= (+ i each) (length rsp))
+                  do (let ((group-end (u16-le rsp (+ i 2))))
+                       (push (make-gatt-service :start (u16-le rsp i)
+                                                :end group-end
+                                                :uuid (subseq rsp (+ i 4) (+ i each)))
+                             services)
+                       (setf last group-end)
+                       (incf i each)))
+            ;; A group ending at 0xFFFF is the last one there can be; asking
+            ;; for more would wrap START to 0 and loop forever.
+            (when (>= last #xFFFF) (return))
+            (setf start (1+ last))))))
+    (nreverse services)))
+
+(defun find-service-by-uuid (services uuid)
+  "The GATT-SERVICE in SERVICES whose UUID matches, or NIL."
+  (find (coerce-octets uuid) services :key #'gatt-service-uuid :test #'equalp))
+
+(defun att-find-service (chan uuid &key (type +gatt-primary-service+))
+  "Ask the peer for the handle range of the service with UUID, using Find By
+Type Value. Returns a GATT-SERVICE, or NIL.
+
+One round trip instead of walking every service on the device -- the peer
+does the matching. What you want when you already know what you are after."
+  (let* ((uuid (coerce-octets uuid))
+         (req (make-octets (+ 7 (length uuid)))))
+    (setf (aref req 0) +att-find-by-type-value-req+)
+    (u16le-put req 1 1)
+    (u16le-put req 3 #xFFFF)
+    (u16le-put req 5 type)
+    (replace req uuid :start1 7)
+    (let ((rsp (att-request chan req :expect +att-find-by-type-value-rsp+)))
+      (when (and rsp (vectorp rsp) (not (att-error-p rsp))
+                 (= (aref rsp 0) +att-find-by-type-value-rsp+)
+                 (>= (length rsp) 5))
+        ;; Handles Information List: found handle(2), group end handle(2).
+        (make-gatt-service :start (u16-le rsp 1)
+                           :end (u16-le rsp 3)
+                           :uuid uuid)))))
+
+;;; --- descriptors ------------------------------------------------------
+
+(defun att-discover-descriptors (chan start end)
+  "Every attribute handle in [START, END] with its UUID, via Find Information.
+Returns a list of (HANDLE . UUID-OCTETS) in handle order.
+
+This is the raw attribute list -- characteristic declarations and values
+included. Find Information does not filter and neither does this. For the
+descriptors of one characteristic, ask over the range after its value handle."
+  (let ((out nil) (next start))
+    (loop
+      (when (> next end) (return))
+      (let ((req (make-octets 5)))
+        (setf (aref req 0) +att-find-info-req+)
+        (u16le-put req 1 next)
+        (u16le-put req 3 end)
+        (let ((rsp (att-request chan req :expect +att-find-info-rsp+)))
+          (when (or (null rsp) (att-error-p rsp)
+                    (/= (aref rsp 0) +att-find-info-rsp+)
+                    (< (length rsp) 4))
+            (return))
+          (let* ((fmt (aref rsp 1))          ; 1 = 16-bit UUIDs, 2 = 128-bit
+                 (step (if (= fmt 1) 4 18))
+                 (i 2) (last 0))
+            (loop while (<= (+ i step) (length rsp))
+                  do (let ((handle (u16-le rsp i)))
+                       (push (cons handle (subseq rsp (+ i 2) (+ i step))) out)
+                       (setf last handle)
+                       (incf i step)))
+            (when (or (zerop last) (>= last end) (>= last #xFFFF)) (return))
+            (setf next (1+ last))))))
+    (nreverse out)))
+
+;;; --- characteristics ---------------------------------------------------
+
+(defun att-discover-characteristics (fd &key (start 1) (end #xFFFF))
+  "Walk Read-By-Type (0x2803) and return a list of GATT-CHAR in handle order.
+
+START and END bound the search. The whole handle space finds every
+characteristic on the device, which is usually what you want; passing a
+GATT-SERVICE's range is how you find the ones belonging to that service,
+since ATT has no other notion of membership."
+  (let ((chars nil))
     (loop
       (let ((req (make-octets 7)))
         (setf (aref req 0) +att-read-by-type-req+)
         (u16le-put req 1 start)
-        (u16le-put req 3 #xFFFF)
+        (u16le-put req 3 end)
         (u16le-put req 5 +gatt-characteristic-decl+)
         (let ((rsp (att-request fd req :expect +att-read-by-type-rsp+)))
           (when (or (null rsp) (att-error-p rsp)
@@ -500,7 +620,7 @@ GATT-CHAR, in handle order."
                       chars)
                 (setf last decl-handle)
                 (incf i each)))
-            (when (>= last #xFFFF) (return))
+            (when (or (>= last end) (>= last #xFFFF)) (return))
             (setf start (1+ last))))))
     (nreverse chars)))
 

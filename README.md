@@ -19,10 +19,16 @@ with no Bluetooth.
 
 ```sh
 make test    # portable suite (37 checks); runs anywhere, including macOS
-make check   # also the I/O layer's radio-free parts (47 more)
+make check   # also the I/O layer's radio-free parts (68 more)
 ```
 
 ## What it gives you
+
+**Advertising.** Both forms, for the same reason both scan paths exist:
+`set-adv-parameters` / `set-adv-data` / `set-scan-response-data` /
+`set-adv-enable` are the legacy 4.0 commands every controller implements, and
+`set-extended-adv-*` are the 5.0 ones that can reach the Coded PHY. Offering
+only extended meant you could scan on a radio you could not advertise from.
 
 **Scanning.** `scan-reports` is the vendor-neutral loop — every advertising
 report to a callback, bounded by seconds or count. `discover` merges reports
@@ -35,9 +41,14 @@ Both the legacy 4.0 scan commands and the 5.0 extended ones are here, and you
 need both. Extended is the only way to reach the Coded PHY; legacy is the only
 thing some controllers implement.
 
-**GATT.** `att-discover-characteristics` returns `gatt-char` records carrying
-the property bitmap, which is how you tell a device's command channel from its
-data channel without guessing. `uuid16`, `find-char-by-uuid`.
+**GATT discovery.** `att-discover-services` walks the primary services;
+`att-find-service` asks the peer for one UUID's handle range in a single round
+trip. `att-discover-characteristics` takes `:start`/`:end`, because a
+service's handle range *is* the membership test — ATT has no other notion of
+which service a characteristic belongs to. It returns `gatt-char` records
+carrying the property bitmap, which is how you tell a device's command channel
+from its data channel without guessing. `att-discover-descriptors` gives the
+raw attribute list over a range.
 
 Reading: `att-read-value`, `att-read-long-value` (Read Blob continuation), and
 `att-read-characteristic` to read by UUID rather than by a handle number that
@@ -54,8 +65,8 @@ for you. Without that a peer sends one indication and then waits forever,
 which presents as a device that stopped talking.
 
 Not implemented: Read Multiple, Prepare/Execute Write (so no write longer than
-MTU−3 to a single attribute), service discovery by group type, and SMP — this
-cannot talk to a peer that requires a bonded link.
+MTU−3 to a single attribute), and SMP — this cannot talk to a peer that
+requires a bonded link.
 
 **Two transports, one ATT layer.** `att-send` and `att-recv` dispatch on
 whether the channel is an integer fd (a kernel L2CAP socket) or an `hci-conn`,
