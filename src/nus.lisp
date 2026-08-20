@@ -53,6 +53,8 @@
 (defconstant +att-write-req+         #x12)
 (defconstant +att-write-rsp+         #x13)
 (defconstant +att-handle-value-ntf+  #x1B)
+(defconstant +att-handle-value-ind+  #x1D)
+(defconstant +att-handle-value-cfm+  #x1E)
 (defconstant +att-write-cmd+         #x52)
 
 (defconstant +att-err-attr-not-found+ #x0A)
@@ -174,7 +176,9 @@ src/hci-conn.lisp."
             (%fill-sockaddr-l2 sa :bdaddr (coerce-octets mac)
                                   :bdaddr-type bdaddr-type)
             (connect-with-timeout fd sa 14 (round (* 1000 timeout))))
-          fd)
+          ;; Registered so CLOSE-ALL-ATT-CHANNELS can find it; see
+          ;; src/teardown.lisp.
+          (register-att-channel fd))
       (error (c) (%close fd) (error c)))))
 
 ;;; --- ATT send / receive over the seqpacket socket ---------------------
@@ -243,6 +247,11 @@ NIL, the first non-skipped PDU is returned."
         while (and rsp (vectorp rsp))
         for op = (aref rsp 0)
         do (cond ((= op +att-handle-value-ntf+) nil)        ; stray notification
+                 ((= op +att-handle-value-ind+)             ; stray indication
+                  ;; Skipping without confirming would wedge the peer for
+                  ;; every later exchange, so this is not optional here
+                  ;; either -- discovery is exactly when strays arrive.
+                  (att-confirm-indication chan))
                  ((= op +att-exchange-mtu-req+)             ; peer-initiated MTU: answer
                   (let ((r (make-octets 3)))
                     (setf (aref r 0) +att-exchange-mtu-rsp+)
@@ -251,6 +260,17 @@ NIL, the first non-skipped PDU is returned."
                  ((= op +att-error-rsp+) (return rsp))
                  ((or (null expect) (= op expect)) (return rsp))
                  (t nil))))                                  ; non-matching: skip, keep reading
+
+(defun att-confirm-indication (chan)
+  "Answer an indication with a Handle Value Confirmation.
+
+Not politeness. An indicating peer is required to wait for this before it may
+send another, so a client that never confirms receives exactly one indication
+and then silence -- which presents as a device that stopped talking rather
+than as a protocol error."
+  (att-send chan (let ((pdu (make-octets 1)))
+                   (setf (aref pdu 0) +att-handle-value-cfm+)
+                   pdu)))
 
 (defun att-error-p (rsp) (and rsp (= (aref rsp 0) +att-error-rsp+)))
 
@@ -329,7 +349,12 @@ data channel without guessing."
 
 (defun att-subscribe (chan cccd-handle &key indications)
   "Enable notifications (or indications) by writing to the CCCD at
-CCCD-HANDLE. Signals on an ATT error."
+CCCD-HANDLE. Signals on an ATT error.
+
+INDICATIONS selects the confirmed variant. ATT-NEXT-NOTIFICATION returns
+those alongside notifications and sends the required confirmation; until it
+did, this flag wrote the right CCCD value and then stalled the peer after a
+single indication, which is worse than not offering it."
   (let ((rsp-or-code (att-write-value chan cccd-handle
                                       (let ((v (make-octets 2)))
                                         (u16le-put v 0 (if indications #x0002 #x0001))
@@ -354,6 +379,7 @@ value octets. NIL on timeout, on disconnect, or on any other PDU."
 (defun att-channel-close (chan)
   "Close an ATT channel, whichever transport it is: a kernel L2CAP socket, or
 an HCI-CONN whose adapter has to be handed back to the kernel."
+  (unregister-att-channel chan)
   (cond ((integerp chan) (%close chan))
         (chan (hci-conn-close chan))))
 

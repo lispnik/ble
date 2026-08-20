@@ -37,7 +37,18 @@
                              (:file "hci"        :depends-on ("ffi"))
                              (:file "advertiser" :depends-on ("hci"))
                              (:file "nus"        :depends-on ("hci"))
-                             (:file "hci-conn"   :depends-on ("nus"))))))
+                             (:file "hci-conn"   :depends-on ("nus"))
+                             (:file "teardown"   :depends-on ("hci-conn"))))))
+
+(asdf:defsystem #:ble/io-tests
+  :description "Tests for the parts of the I/O layer that need no radio."
+  :depends-on  (#:ble #:ble/tests)
+  :components ((:module "tests"
+                :components ((:file "io-tests"))))
+  :perform (asdf:test-op (op c)
+             (declare (ignore op c))
+             (unless (uiop:symbol-call :ble/tests :run-io-tests)
+               (error "ble I/O test suite failed"))))
 
 (asdf:defsystem #:ble/tests
   :description "Test suite for the portable parts of ble."

@@ -360,7 +360,8 @@ own GATT over an adapter we own starts here."
                          sock (coerce-octets mac) peer-type
                          :init-phys init-phys :command command
                          :timeout-ms (round (* 1000 timeout)) :retries retries)))
-            (make-hci-conn :sock sock :handle handle :acl-len acl-len))
+            (register-att-channel
+             (make-hci-conn :sock sock :handle handle :acl-len acl-len)))
         (error (c)
           (ignore-errors (close-hci-user-socket sock))
           (error c))))))

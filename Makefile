@@ -22,12 +22,12 @@ test:
 	$(SBCL) $(SBCL_FLAGS) $(BOOT) \
 	  --eval "(asdf:test-system :ble/tests)" --eval "(sb-ext:exit)"
 
-# Compiling `ble' proves the foreign bindings and the HCI/ATT code still
-# build. It loads on macOS -- the bindings are plain libc and only fail when
-# called -- so this is worth running off the target platform too.
+# Also the I/O layer: its pure parts (registry, UUIDs, report parsers,
+# connection parameters) are testable without a radio, and `ble' loads on
+# macOS anyway -- the bindings are plain libc and only fail when CALLED.
 check: test
 	$(SBCL) $(SBCL_FLAGS) $(BOOT) \
-	  --eval "(asdf:load-system :ble)" \
+	  --eval "(asdf:test-system :ble/io-tests)" \
 	  --eval "(format t \"~&ble loaded: ~D exported symbols~%\" \
 	            (let ((n 0)) (do-external-symbols (s :ble) (declare (ignore s)) (incf n)) n))" \
 	  --eval "(sb-ext:exit)"

@@ -1,6 +1,6 @@
 (defpackage #:ble/tests
   (:use #:cl #:fiveam)
-  (:export #:run-tests #:ble-core))
+  (:export #:run-tests #:run-io-tests #:ble-core #:ble-io))
 
 (in-package #:ble/tests)
 

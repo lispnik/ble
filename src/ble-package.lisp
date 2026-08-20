@@ -89,6 +89,7 @@
           att-write-command
           att-subscribe
           att-next-notification
+          att-confirm-indication
           att-channel-close
           ;; Nordic UART Service GATT client
           nus-connect
@@ -112,4 +113,10 @@
           hci-le-create-connection
           hci-conn
           hci-conn-handle
-          hci-conn-close))
+          hci-conn-close
+          ;; Giving the adapter back (src/teardown.lisp)
+          *open-att-channels*
+          register-att-channel
+          unregister-att-channel
+          close-all-att-channels
+          install-adapter-teardown))
