@@ -1,22 +1,27 @@
 #!/usr/bin/env bash
 #
-# Install what is needed and run the suites. Used identically by the native
-# x86_64 job and the emulated aarch64 container, so a failure in one is
-# comparable to the other rather than an artefact of how it was invoked.
+# Install what is needed and run the suites. Used identically by every job in
+# the matrix, so a failure on one architecture is comparable to the other
+# rather than an artefact of how it was invoked.
 #
 # The last line is `make check' -- the same command a developer runs. That is
 # the point of restoring dependencies with ocicl rather than reaching for
 # Quicklisp: ocicl.csv pins every system by OCI digest, so CI resolves to the
 # same bytes as a workstation, and the hermetic source registry in the
 # Makefile stays hermetic instead of needing a CI-shaped exception.
+#
+# Runs both as an unprivileged CI user and as root in a container, so it asks
+# for sudo only when it is neither root nor already supplied with sbcl.
 set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 export PATH="$HOME/.local/bin:$PATH"
 
 if ! command -v sbcl >/dev/null 2>&1; then
-  apt-get update -qq
-  apt-get install -y -qq --no-install-recommends \
+  SUDO=""
+  [ "$(id -u)" -eq 0 ] || SUDO="sudo"
+  $SUDO apt-get update -qq
+  $SUDO apt-get install -y -qq --no-install-recommends \
     sbcl git curl ca-certificates make
 fi
 
