@@ -48,6 +48,10 @@
 (defconstant +att-exchange-mtu-rsp+  #x03)
 (defconstant +att-find-info-req+     #x04)
 (defconstant +att-find-info-rsp+     #x05)
+(defconstant +att-read-req+          #x0A)
+(defconstant +att-read-rsp+          #x0B)
+(defconstant +att-read-blob-req+     #x0C)
+(defconstant +att-read-blob-rsp+     #x0D)
 (defconstant +att-read-by-type-req+  #x08)
 (defconstant +att-read-by-type-rsp+  #x09)
 (defconstant +att-write-req+         #x12)
@@ -57,7 +61,9 @@
 (defconstant +att-handle-value-cfm+  #x1E)
 (defconstant +att-write-cmd+         #x52)
 
-(defconstant +att-err-attr-not-found+ #x0A)
+(defconstant +att-err-attr-not-found+     #x0A)
+(defconstant +att-err-invalid-offset+     #x07)
+(defconstant +att-err-attr-not-long+      #x0B)
 
 (defconstant +gatt-characteristic-decl+ #x2803)
 (defconstant +gatt-cccd+                #x2902)
@@ -234,6 +240,92 @@ device that accepted it and did nothing."
       (cond ((null rsp) :timeout)
             ((att-error-p rsp) (when (>= (length rsp) 5) (aref rsp 4)))
             (t t)))))
+
+;;; --- reading --------------------------------------------------------
+
+(defun %read-req-pdu (handle)
+  (let ((pdu (make-octets 3)))
+    (setf (aref pdu 0) +att-read-req+)
+    (u16le-put pdu 1 handle)
+    pdu))
+
+(defun %read-blob-req-pdu (handle offset)
+  (let ((pdu (make-octets 5)))
+    (setf (aref pdu 0) +att-read-blob-req+)
+    (u16le-put pdu 1 handle)
+    (u16le-put pdu 3 offset)
+    pdu))
+
+(defun att-read-value (chan handle)
+  "Read the value of the attribute at HANDLE with a Read Request.
+
+Returns (VALUES OCTETS ERROR). ERROR is NIL on success, :TIMEOUT, or the ATT
+error code. Two octets come back rather than one flag because for a read the
+payload is the point -- ATT-WRITE-VALUE can get away with returning T.
+
+The value may be TRUNCATED: a Read Response carries at most MTU-1 octets, and
+the peer does not say whether more exists. See ATT-READ-LONG-VALUE, and
+VALUE-MAY-BE-TRUNCATED-P for how to tell."
+  (let ((rsp (att-request chan (%read-req-pdu handle) :expect +att-read-rsp+)))
+    (cond ((null rsp) (values nil :timeout))
+          ((att-error-p rsp) (values nil (when (>= (length rsp) 5) (aref rsp 4))))
+          (t (values (subseq rsp 1) nil)))))
+
+(defun value-may-be-truncated-p (value mtu)
+  "True when VALUE exactly fills what a Read Response can carry at MTU.
+
+ATT gives no length field and no more-data flag: a full response is the only
+hint that the attribute is longer, and it is ambiguous -- a value that happens
+to be exactly MTU-1 octets looks identical to a truncated one. That ambiguity
+is why reading long values takes a second round trip that usually finds
+nothing."
+  (>= (length value) (1- mtu)))
+
+(defun att-read-long-value (chan handle &key (mtu *att-rx-mtu*) (max-length 512))
+  "Read the whole value at HANDLE, continuing with Read Blob Requests while
+the peer keeps filling responses.
+
+Returns (VALUES OCTETS ERROR) like ATT-READ-VALUE. MAX-LENGTH caps the result
+-- the ATT maximum attribute length is 512 octets, and a peer that answers
+blob requests forever should not be able to exhaust memory here.
+
+An ATT error on a continuation is not necessarily a failure: a peer answering
+Attribute Not Long or Invalid Offset is saying the value ended exactly on the
+boundary, so what has been read is complete and is returned."
+  (multiple-value-bind (value error) (att-read-value chan handle)
+    (when error (return-from att-read-long-value (values nil error)))
+    (loop
+      (unless (value-may-be-truncated-p value mtu) (return))
+      (when (>= (length value) max-length) (return))
+      (let ((rsp (att-request chan (%read-blob-req-pdu handle (length value))
+                              :expect +att-read-blob-rsp+)))
+        (cond
+          ((null rsp) (return-from att-read-long-value (values value :timeout)))
+          ((att-error-p rsp)
+           (let ((code (when (>= (length rsp) 5) (aref rsp 4))))
+             (if (member code (list +att-err-attr-not-long+ +att-err-invalid-offset+))
+                 (return)                       ; ended on the boundary
+                 (return-from att-read-long-value (values value code)))))
+          (t
+           (let ((chunk (subseq rsp 1)))
+             (when (zerop (length chunk)) (return))
+             (setf value (concatenate '(simple-array (unsigned-byte 8) (*))
+                                      value chunk))
+             ;; A short blob response means the value ended here.
+             (when (< (length chunk) (- mtu 1)) (return)))))))
+    (values (if (> (length value) max-length) (subseq value 0 max-length) value)
+            nil)))
+
+(defun att-read-characteristic (chan chars uuid &key long (mtu *att-rx-mtu*))
+  "Read the characteristic in CHARS whose UUID matches, in one step.
+
+The common case: discover once, then read by UUID rather than by a handle
+number that means nothing at the call site. Returns (VALUES OCTETS ERROR),
+with ERROR :NOT-FOUND when no characteristic matches."
+  (let ((c (find-char-by-uuid chars uuid)))
+    (cond ((null c) (values nil :not-found))
+          (long (att-read-long-value chan (gatt-char-handle c) :mtu mtu))
+          (t (att-read-value chan (gatt-char-handle c))))))
 
 (defun att-request (chan pdu &key expect)
   "Send PDU and return the response PDU matching EXPECT (or an error

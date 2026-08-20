@@ -18,8 +18,8 @@ parsing. Both current consumers rely on that to run their tests on a machine
 with no Bluetooth.
 
 ```sh
-make test    # portable suite; runs anywhere, including macOS
-make check   # also compiles the Linux-only I/O layer
+make test    # portable suite (37 checks); runs anywhere, including macOS
+make check   # also the I/O layer's radio-free parts (47 more)
 ```
 
 ## What it gives you
@@ -37,8 +37,25 @@ thing some controllers implement.
 
 **GATT.** `att-discover-characteristics` returns `gatt-char` records carrying
 the property bitmap, which is how you tell a device's command channel from its
-data channel without guessing. `uuid16`, `find-char-by-uuid`, `att-subscribe`,
-`att-write-command`, `att-write-value`, `att-next-notification`.
+data channel without guessing. `uuid16`, `find-char-by-uuid`.
+
+Reading: `att-read-value`, `att-read-long-value` (Read Blob continuation), and
+`att-read-characteristic` to read by UUID rather than by a handle number that
+means nothing at the call site. Note that ATT gives no length field and no
+more-data flag, so a response that exactly fills the MTU is the only hint a
+value continues — and it is ambiguous. `value-may-be-truncated-p` is that test
+spelled out; the long read pays a round trip that usually finds nothing.
+
+Writing and subscribing: `att-write-value` (Write Request),
+`att-write-command` (fire-and-forget), `att-subscribe`,
+`att-next-notification`. Indications are supported properly — they arrive
+through the same call as notifications and the required confirmation is sent
+for you. Without that a peer sends one indication and then waits forever,
+which presents as a device that stopped talking.
+
+Not implemented: Read Multiple, Prepare/Execute Write (so no write longer than
+MTU−3 to a single attribute), service discovery by group type, and SMP — this
+cannot talk to a peer that requires a bonded link.
 
 **Two transports, one ATT layer.** `att-send` and `att-recv` dispatch on
 whether the channel is an integer fd (a kernel L2CAP socket) or an `hci-conn`,

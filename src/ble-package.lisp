@@ -85,6 +85,10 @@
           att-exchange-mtu
           att-discover-characteristics
           att-find-cccd
+          att-read-value
+          att-read-long-value
+          att-read-characteristic
+          value-may-be-truncated-p
           att-write-value
           att-write-command
           att-subscribe

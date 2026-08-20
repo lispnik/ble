@@ -119,3 +119,62 @@ byte that says nothing about which field moved."
     ;; whatever that byte pattern happens to name
     (is (equalp mac (subseq (ble::%legacy-create-conn-params mac 0) 6 12)))
     (is (equalp mac (subseq (ble::%extended-create-conn-params mac 0 #x01) 3 9)))))
+
+;;; --- reading -----------------------------------------------------------
+
+(test read-request-pdus-are-spec-shaped
+  (is (equalp (hex->octets "0A" "0C00") (ble::%read-req-pdu #x000C))
+      "Read Request: opcode, then the handle little-endian")
+  (is (equalp (hex->octets "0C" "0C00" "1400") (ble::%read-blob-req-pdu #x000C 20))
+      "Read Blob adds a 16-bit offset"))
+
+(test truncation-is-only-ever-a-suspicion
+  "ATT has no length field and no more-data flag. A response that exactly
+fills the MTU is the only hint the value continues -- and it is ambiguous,
+which is why a long read costs a round trip that usually finds nothing."
+  (let ((mtu 23))
+    (is-true  (ble:value-may-be-truncated-p (ble:make-octets 22) mtu)
+              "22 = MTU-1, so it might continue")
+    (is-false (ble:value-may-be-truncated-p (ble:make-octets 21) mtu)
+              "21 leaves room, so it certainly ended")
+    (is-false (ble:value-may-be-truncated-p (ble:make-octets 0) mtu)))
+  (is-true (ble:value-may-be-truncated-p (ble:make-octets 246) 247)))
+
+(test read-characteristic-reports-a-missing-uuid-distinctly
+  "Not found is not a read failure, and a caller that cannot tell them apart
+will retry a device that was never going to have the characteristic."
+  (multiple-value-bind (value error)
+      (ble:att-read-characteristic nil '() (ble:uuid16 #xFFE1))
+    (is (null value))
+    (is (eq :not-found error))))
+
+;;; --- RSSI and adapter labels -------------------------------------------
+;;;
+;;; These were in bledecode's CLI suite, testing this library's code from a
+;;; consumer, because at the time ble had no suite that could load ble. It
+;;; does now.
+
+(test rssi-not-available-sentinel
+  "0x7F is the spec's \"RSSI is not available\". Taken literally it renders as
+a nonsensical +127 dBm, and every consumer already handles a missing RSSI --
+a replayed capture has none either."
+  (is (null (ble::decode-rssi #x7F)))
+  (is (= -55 (ble::decode-rssi (+ 256 -55))))
+  (is (= -1 (ble::decode-rssi #xFF)))
+  (is (= -128 (ble::decode-rssi #x80)))
+  (is (= 0 (ble::decode-rssi 0)))
+  (is (= 20 (ble::decode-rssi 20))))
+
+(test adapter-label-can-omit-the-address
+  (let ((a (ble::make-hci-adapter
+            :index 1 :bus :usb :product "TP-TP+ Bluetooth USB Adapter"
+            :address (ble:parse-mac "A1:B2:C3:D4:E5:F6"))))
+    (is (search "A1:B2:C3:D4:E5:F6" (ble:hci-adapter-label a)))
+    (is (not (search "A1:B2" (ble:hci-adapter-label a :address nil))))
+    (is (search "hci1" (ble:hci-adapter-label a :address nil)))
+    (is (search "(USB)" (ble:hci-adapter-label a :address nil)))))
+
+(test adapter-label-names-the-built-in-radio
+  (let ((a (ble::make-hci-adapter :index 0 :bus :serial :product nil :address nil)))
+    (is (search "built-in UART radio" (ble:hci-adapter-label a)))
+    (is (search "(UART)" (ble:hci-adapter-label a)))))
