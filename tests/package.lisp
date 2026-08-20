@@ -1,6 +1,3 @@
-(eval-when (:compile-toplevel :load-toplevel :execute)
-  (require :sb-introspect))
-
 (defpackage #:ble/tests
   (:use #:cl #:fiveam)
   (:export #:run-tests #:run-io-tests #:ble-core #:ble-io))

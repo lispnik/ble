@@ -33,8 +33,23 @@
   (errnum :int))
 
 (defun errno ()
+  "The current errno.
+
+Not merely for error messages. CONNECT-WITH-TIMEOUT tells an asynchronous
+connect from a failed one by comparing this against EINPROGRESS, and both
+poll loops treat EINTR as \"nothing yet\" rather than an error. A wrong answer
+here does not produce a confusing message, it produces wrong control flow --
+which is why the non-SBCL branch refuses instead of returning 0, as it used
+to. Zero means success, so the old fallback turned every asynchronous connect
+into a spurious failure and every interrupted poll into a hard error.
+
+Portable access is possible -- CFFI can reach __errno_location() on both
+glibc and musl, which is all this Linux-only library targets -- and would be
+the way to lift this restriction properly."
   #+sbcl (sb-alien:get-errno)
-  #-sbcl 0)
+  #-sbcl (error "ble: errno is unimplemented on ~A. It is needed for control ~
+                 flow, not only for diagnostics; see the docstring."
+                (lisp-implementation-type)))
 
 (define-condition syscall-error (error)
   ((label :initarg :label :reader syscall-error-label)

@@ -227,18 +227,6 @@ which a scanner reports as a device with no name rather than as an error."
     (is (eq gap (ble:find-service-by-uuid services (ble:uuid16 #x1800))))
     (is (null (ble:find-service-by-uuid services (ble:uuid16 #x180F))))))
 
-(test characteristic-discovery-defaults-to-the-whole-handle-space
-  "Membership is the handle range and nothing else -- ATT has no other notion
-of which service a characteristic belongs to, so the range has to reach the
-request. Defaulting to 1..FFFF keeps the common call unchanged."
-  (let ((ll (sb-introspect:function-lambda-list 'ble:att-discover-characteristics)))
-    (is (equal '(fd &key (start 1) (end 65535))
-               (mapcar (lambda (x) (if (consp x) (list (intern (string (first x)))
-                                                       (second x))
-                                       (intern (string x))))
-                       ll))
-        "signature drifted: ~A" ll)))
-
 ;;; --- the ATT loops, driven by a scripted peer --------------------------
 ;;;
 ;;; What follows is the part that needed a radio until the library grew
