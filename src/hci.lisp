@@ -50,16 +50,23 @@
 
 (defstruct hci-socket fd dev)
 
+(defun %hci-filter-bytes ()
+  "The 16-octet struct hci_filter that lets every event packet through.
+Split out from SET-HCI-FILTER so the layout can be asserted on: the kernel
+sizes this struct at 16 and rejects any other length with EINVAL, so the two
+bytes of tail padding are load-bearing rather than incidental."
+  (let ((b (make-octets 16)))
+    (dotimes (i 12) (setf (aref b i) #xFF))
+    b))
+
 (defun set-hci-filter (fd)
   "Allow event packets and all event codes through. struct hci_filter is
 {uint32 type_mask; uint32 event_mask[2]; uint16 opcode;} which the kernel
 sizes as 16 bytes (2 bytes of trailing pad), and setsockopt rejects any
 other length with EINVAL."
   (cffi:with-foreign-object (filt :unsigned-char 16)
-    (loop for i from 0 below 12 do
-      (setf (cffi:mem-aref filt :unsigned-char i) #xFF))
-    (loop for i from 12 below 16 do
-      (setf (cffi:mem-aref filt :unsigned-char i) 0))
+    (let ((bytes (%hci-filter-bytes)))
+      (dotimes (i 16) (setf (cffi:mem-aref filt :unsigned-char i) (aref bytes i))))
     (check-syscall (%setsockopt fd +sol-hci+ +hci-filter+ filt 16)
                    "setsockopt HCI_FILTER")))
 

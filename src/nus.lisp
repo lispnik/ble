@@ -202,33 +202,77 @@ src/hci-conn.lisp."
 one HCI ACL packet so no L2CAP fragmentation is needed. Raise it to let a
 device send larger single notifications (the HCI transport reassembles).")
 
-;;; A "channel" is either an integer fd (kernel L2CAP socket; see
-;;; NUS-CONNECT) or an HCI-CONN struct (HCI_CHANNEL_USER transport; see
-;;; hci-conn.lisp). ATT-SEND / ATT-RECV dispatch on which it is, so the ATT
-;;; protocol code below is shared by both transports. The HCI-CONN helpers
-;;; are forward references resolved at load time (hci-conn loads after nus).
+;;; A "channel" is one of three things: an integer fd (kernel L2CAP socket;
+;;; see NUS-CONNECT), an HCI-CONN struct (HCI_CHANNEL_USER transport; see
+;;; hci-conn.lisp), or an ATT-TEST-CHANNEL with a scripted responder behind
+;;; it. ATT-SEND / ATT-RECV dispatch on which, so every line of ATT protocol
+;;; below is shared by all three. The HCI-CONN helpers are forward references
+;;; resolved at load time (hci-conn loads after nus).
+
+;;; --- a channel with no radio behind it ---------------------------------
+;;;
+;;; Every ATT operation below is a loop with a termination condition -- walk
+;;; until the peer says stop, until the handles run out, until a response
+;;; comes back short. Those conditions are where the bugs are, and none of
+;;; them is reachable from a test that needs a device.
+;;;
+;;; This lives in the library rather than the test suite because a consumer
+;;; building its own GATT profile has exactly the same problem, and because
+;;; keeping all the dispatch in one place is what makes the ATT code
+;;; transport-blind to begin with.
+
+(defstruct (att-test-channel (:constructor make-att-test-channel (&key responder)))
+  "An ATT channel backed by a function instead of a socket.
+
+RESPONDER is called with each PDU sent and returns what the peer would reply:
+an octet vector, a list of them, or NIL for silence. SENT keeps every PDU in
+order, so a test can assert on what went out as well as what came back --
+which for something like a range-scoped discovery is the only place the
+behaviour is visible at all."
+  responder
+  (sent '())
+  (inbox '()))
+
+(defun att-test-channel-sent-pdus (chan)
+  "The PDUs written to CHAN, oldest first."
+  (reverse (att-test-channel-sent chan)))
+
+(defun %test-channel-send (chan pdu)
+  (let ((pdu (coerce-octets pdu)))
+    (push pdu (att-test-channel-sent chan))
+    (let ((reply (funcall (att-test-channel-responder chan) pdu)))
+      (dolist (r (cond ((null reply) '())
+                       ((listp reply) reply)
+                       (t (list reply))))
+        (setf (att-test-channel-inbox chan)
+              (append (att-test-channel-inbox chan) (list (coerce-octets r))))))
+    (length pdu)))
 
 (defun att-send (chan pdu)
   "Send one ATT PDU over CHAN."
-  (if (integerp chan)
-      (let* ((pdu (coerce-octets pdu))
-             (n (length pdu)))
-        (cffi:with-foreign-object (buf :unsigned-char (max 1 n))
-          (bytes-to-foreign pdu buf)
-          (check-syscall (%write chan buf n) "att write")))
-      (hci-acl-send-att chan pdu)))
+  (cond
+    ((att-test-channel-p chan) (%test-channel-send chan pdu))
+    ((integerp chan)
+     (let* ((pdu (coerce-octets pdu))
+            (n (length pdu)))
+       (cffi:with-foreign-object (buf :unsigned-char (max 1 n))
+         (bytes-to-foreign pdu buf)
+         (check-syscall (%write chan buf n) "att write"))))
+    (t (hci-acl-send-att chan pdu))))
 
 (defun att-recv (chan &optional (timeout-ms 5000))
   "Receive one ATT PDU from CHAN: octet vector, NIL on timeout/EOF, or the
 symbol :DISCONNECTED (HCI transport only). TIMEOUT-MS now bounds BOTH
 transports -- the kernel-socket path used to block indefinitely, which meant
 a caller could not stop on a deadline."
-  (if (integerp chan)
-      (when (fd-readable-p chan timeout-ms)
-        (cffi:with-foreign-object (buf :unsigned-char *att-buffer-size*)
-          (let ((n (%read chan buf *att-buffer-size*)))
-            (when (> n 0) (foreign-to-bytes buf n)))))
-      (hci-acl-recv-att chan timeout-ms)))
+  (cond
+    ((att-test-channel-p chan) (pop (att-test-channel-inbox chan)))
+    ((integerp chan)
+     (when (fd-readable-p chan timeout-ms)
+       (cffi:with-foreign-object (buf :unsigned-char *att-buffer-size*)
+         (let ((n (%read chan buf *att-buffer-size*)))
+           (when (> n 0) (foreign-to-bytes buf n))))))
+    (t (hci-acl-recv-att chan timeout-ms))))
 
 (defun att-write-value (chan handle value)
   "Write VALUE to HANDLE with a Write Request and wait for the answer.
@@ -466,13 +510,21 @@ single indication, which is worse than not offering it."
     t))
 
 (defun att-next-notification (chan handle &optional (timeout-ms 5000))
-  "Block for the next Handle Value Notification on HANDLE and return its
-value octets. NIL on timeout, on disconnect, or on any other PDU."
+  "Block for the next Handle Value Notification OR Indication on HANDLE and
+return its value octets. NIL on timeout, on disconnect, or on any other PDU.
+
+An indication is confirmed before returning. The two are deliberately not
+distinguished in the return value: which one a device uses is its choice, the
+payload means the same either way, and a caller made to handle both would end
+up writing this function again."
   (let ((pdu (att-recv chan timeout-ms)))
     (when (and pdu (vectorp pdu) (>= (length pdu) 3)
-               (= (aref pdu 0) +att-handle-value-ntf+)
                (= (u16-le pdu 1) handle))
-      (subseq pdu 3))))
+      (let ((op (aref pdu 0)))
+        (cond ((= op +att-handle-value-ntf+) (subseq pdu 3))
+              ((= op +att-handle-value-ind+)
+               (att-confirm-indication chan)
+               (subseq pdu 3)))))))
 
 (defun att-channel-close (chan)
   "Close an ATT channel, whichever transport it is: a kernel L2CAP socket, or
@@ -524,9 +576,14 @@ the ones only meant to be included by others."
                              services)
                        (setf last group-end)
                        (incf i each)))
-            ;; A group ending at 0xFFFF is the last one there can be; asking
-            ;; for more would wrap START to 0 and loop forever.
-            (when (>= last #xFFFF) (return))
+            ;; Two ways this walk can fail to end, and both hang rather than
+            ;; error. A group ending at 0xFFFF is the last one there can be,
+            ;; so asking again would wrap START back to 0. And a peer that
+            ;; answers with handles at or below where we asked has not moved
+            ;; us forward -- repeating the request would repeat the answer.
+            ;; Neither is hypothetical: the second one was found by a test
+            ;; whose stub responder simply returned the same reply twice.
+            (when (or (>= last #xFFFF) (< last start)) (return))
             (setf start (1+ last))))))
     (nreverse services)))
 
@@ -585,7 +642,8 @@ descriptors of one characteristic, ask over the range after its value handle."
                        (push (cons handle (subseq rsp (+ i 2) (+ i step))) out)
                        (setf last handle)
                        (incf i step)))
-            (when (or (zerop last) (>= last end) (>= last #xFFFF)) (return))
+            (when (or (zerop last) (>= last end) (>= last #xFFFF) (< last next))
+              (return))
             (setf next (1+ last))))))
     (nreverse out)))
 
@@ -620,7 +678,11 @@ since ATT has no other notion of membership."
                       chars)
                 (setf last decl-handle)
                 (incf i each)))
-            (when (or (>= last end) (>= last #xFFFF)) (return))
+            ;; Stop at the end of the range, at the top of the handle space,
+            ;; or the moment the peer stops moving us forward. See the note
+            ;; in ATT-DISCOVER-SERVICES: without the last test a peer that
+            ;; repeats itself loops here forever.
+            (when (or (>= last end) (>= last #xFFFF) (< last start)) (return))
             (setf start (1+ last))))))
     (nreverse chars)))
 

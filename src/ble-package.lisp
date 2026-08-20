@@ -85,6 +85,11 @@
           gatt-char-property-names
           find-char-by-uuid
           char-handle-by-uuid
+          att-test-channel
+          att-test-channel-p
+          make-att-test-channel
+          att-test-channel-sent
+          att-test-channel-sent-pdus
           att-send
           att-recv
           att-request

@@ -238,3 +238,183 @@ request. Defaulting to 1..FFFF keeps the common call unchanged."
                                        (intern (string x))))
                        ll))
         "signature drifted: ~A" ll)))
+
+;;; --- the ATT loops, driven by a scripted peer --------------------------
+;;;
+;;; What follows is the part that needed a radio until the library grew
+;;; ATT-TEST-CHANNEL. These are walks with termination conditions -- stop at
+;;; 0xFFFF, stop on a short response, stop when the peer errors -- and a walk
+;;; that fails to terminate hangs rather than fails.
+
+(defun scripted (&rest exchanges)
+  "A channel whose responder answers by opcode. EXCHANGES are (OPCODE . FN)
+where FN takes the request PDU and returns the reply."
+  (ble:make-att-test-channel
+   :responder (lambda (pdu)
+                (let ((entry (assoc (aref pdu 0) exchanges)))
+                  (when entry (funcall (cdr entry) pdu))))))
+
+(test service-discovery-walks-until-the-handles-run-out
+  (let* ((round 0)
+         (chan (scripted
+                (cons #x10
+                      (lambda (pdu)
+                        (declare (ignore pdu))
+                        (incf round)
+                        (case round
+                          ;; each-len 6: start(2) end(2) uuid16(2)
+                          (1 (hex->octets "11" "06" "0100" "0900" "0018"
+                                                    "0A00" "0E00" "E0FF"))
+                          ;; second round, and this one ends at FFFF
+                          (2 (hex->octets "11" "06" "0F00" "FFFF" "0F18"))
+                          (t (hex->octets "01" "10" "0000" "0A")))))))
+         (services (ble:att-discover-services chan)))
+    (is (= 3 (length services)))
+    (is (equal '(1 10 15) (mapcar #'ble:gatt-service-start services)))
+    (is (string= "FFE0" (ble:gatt-service-uuid-string (second services))))
+    (is (= 2 round)
+        "must stop after the group ending at FFFF -- asking again would wrap ~
+         START to 0 and walk forever")))
+
+(test service-discovery-stops-when-the-peer-says-not-found
+  (let ((chan (scripted (cons #x10 (lambda (pdu) (declare (ignore pdu))
+                                     ;; Attribute Not Found ends a walk
+                                     (hex->octets "01" "10" "0100" "0A"))))))
+    (is (null (ble:att-discover-services chan)))))
+
+(test characteristic-discovery-asks-over-the-range-it-was-given
+  "The only place scoping is observable is the request itself."
+  (let* ((chan (scripted (cons #x08 (lambda (pdu) (declare (ignore pdu))
+                                      (hex->octets "01" "08" "0A00" "0A"))))))
+    (ble:att-discover-characteristics chan :start #x000A :end #x000E)
+    (let ((req (first (ble:att-test-channel-sent-pdus chan))))
+      (is (= #x000A (ble:u16-le req 1)) "start handle")
+      (is (= #x000E (ble:u16-le req 3)) "end handle, not FFFF"))))
+
+(test characteristic-discovery-reads-properties-and-stops-on-not-found
+  (let* ((n 0)
+         (chan (scripted
+                (cons #x08 (lambda (pdu)
+                             (declare (ignore pdu))
+                             (incf n)
+                             (if (= n 1)
+                                 ;; each-len 7: decl(2) props(1) value(2) uuid16(2)
+                                 (hex->octets "09" "07" "0B00" "1C" "0C00" "E1FF")
+                                 (hex->octets "01" "08" "0C00" "0A")))))))
+    (let ((chars (ble:att-discover-characteristics chan :start 10 :end 20)))
+      (is (= 1 (length chars)))
+      (is (= #x000C (ble:gatt-char-handle (first chars))))
+      (is (equal '(:write-without-response :write :notify)
+                 (ble:gatt-char-property-names (first chars)))
+          "0x1C is the bitmap a serial-over-GATT bridge presents"))))
+
+(test a-peer-that-repeats-itself-does-not-hang-the-walk
+  "Found by a stub that returned the same reply every time: the walk advanced
+START from the handles in the response, so a response that did not move
+forward meant the next request was identical, and so was the next answer.
+That is an infinite loop, and an infinite loop in a discovery walk presents
+as a hung process rather than as an error."
+  (let ((chan (scripted
+               ;; always the same record, whatever we ask
+               (cons #x08 (lambda (pdu) (declare (ignore pdu))
+                            (hex->octets "09" "07" "0B00" "1C" "0C00" "E1FF")))
+               (cons #x10 (lambda (pdu) (declare (ignore pdu))
+                            (hex->octets "11" "06" "0100" "0900" "0018"))))))
+    (finishes (ble:att-discover-characteristics chan :start 20 :end 40))
+    (finishes (ble:att-discover-services chan))))
+
+(test long-read-continues-with-blobs-until-a-short-response
+  (let* ((mtu 8)                      ; a response carries at most 7 octets
+         (chan (scripted
+                (cons #x0A (lambda (pdu) (declare (ignore pdu))
+                             ;; opcode + 7 octets = exactly full, so ambiguous
+                             (hex->octets "0B" "01020304050607")))
+                (cons #x0C (lambda (pdu)
+                             (let ((offset (ble:u16-le pdu 3)))
+                               (is (= 7 offset) "blob must resume where we stopped")
+                               ;; short: 3 octets, so the value ends here
+                               (hex->octets "0D" "080910")))))))
+    (multiple-value-bind (value error) (ble:att-read-long-value chan 12 :mtu mtu)
+      (is (null error))
+      (is (equalp (hex->octets "01020304050607080910") value)))))
+
+(test long-read-treats-attribute-not-long-as-the-end
+  "A peer answering Attribute Not Long is saying the value ended exactly on
+the boundary. That is a complete read, not a failure."
+  (let ((chan (scripted
+               ;; 21 octets = MTU-1 at MTU 22, so it looks like it continues
+               (cons #x0A (lambda (pdu) (declare (ignore pdu))
+                            (hex->octets "0B" "0102030405060708090A0B0C0D0E0F10"
+                                              "1112131415")))
+               (cons #x0C (lambda (pdu) (declare (ignore pdu))
+                            (hex->octets "01" "0C" "0C00" "0B"))))))
+    (multiple-value-bind (value error) (ble:att-read-long-value chan 12 :mtu 22)
+      (is (null error))
+      (is (= 21 (length value))))))
+
+(test read-reports-an-att-error-rather-than-inventing-a-value
+  (let ((chan (scripted (cons #x0A (lambda (pdu) (declare (ignore pdu))
+                                     ;; Read Not Permitted
+                                     (hex->octets "01" "0A" "0C00" "02"))))))
+    (multiple-value-bind (value error) (ble:att-read-value chan 12)
+      (is (null value))
+      (is (= 2 error)))))
+
+(test an-indication-is-confirmed-before-its-value-is-returned
+  "Without the confirmation the peer sends one indication and then waits
+forever, which looks like a device that stopped talking."
+  (let ((chan (ble:make-att-test-channel :responder (constantly nil))))
+    (setf (ble::att-test-channel-inbox chan)
+          (list (hex->octets "1D" "0C00" "DEAD")))    ; indication on handle 0x0C
+    (is (equalp (hex->octets "DEAD") (ble:att-next-notification chan #x000C)))
+    (is (equalp (list (hex->octets "1E"))
+                (ble:att-test-channel-sent-pdus chan))
+        "a bare Handle Value Confirmation, and nothing else")))
+
+(test a-notification-needs-no-confirmation
+  (let ((chan (ble:make-att-test-channel :responder (constantly nil))))
+    (setf (ble::att-test-channel-inbox chan)
+          (list (hex->octets "1B" "0C00" "BEEF")))
+    (is (equalp (hex->octets "BEEF") (ble:att-next-notification chan #x000C)))
+    (is (null (ble:att-test-channel-sent-pdus chan)))))
+
+(test att-request-answers-a-peer-mtu-request-mid-exchange
+  "Devices send their own Exchange MTU Request right after connect. Ignoring
+it desyncs every later request/response pair."
+  (let* ((chan (scripted
+                (cons #x0A (lambda (pdu) (declare (ignore pdu))
+                             (list (hex->octets "02" "F700")     ; peer asks first
+                                   (hex->octets "0B" "2A"))))))) ; then answers
+    (multiple-value-bind (value error) (ble:att-read-value chan 12)
+      (is (null error))
+      (is (equalp (hex->octets "2A") value)))
+    (is (find #x03 (ble:att-test-channel-sent-pdus chan) :key (lambda (p) (aref p 0)))
+        "we must have replied with an Exchange MTU Response")))
+
+;;; --- remaining pure buffers --------------------------------------------
+
+(test hci-opcode-packs-ogf-and-ocf
+  ;; LE Set Scan Enable: OGF 0x08, OCF 0x000C -> 0x200C
+  (is (= #x200C (ble::hci-opcode #x08 #x000C)))
+  (is (= #x0C03 (ble::hci-opcode #x03 #x0003)) "HCI Reset"))
+
+(test hci-filter-is-16-octets-with-two-of-padding
+  "The kernel sizes struct hci_filter at 16 and rejects anything else with
+EINVAL, so the padding is load-bearing."
+  (let ((b (ble::%hci-filter-bytes)))
+    (is (= 16 (length b)))
+    (is (every (lambda (x) (= x #xFF)) (subseq b 0 12)) "type and event masks")
+    (is (every #'zerop (subseq b 12)) "opcode and tail padding")))
+
+(test sockaddr-l2-lays-out-family-cid-and-address
+  "14 octets: family(2) psm(2) bdaddr(6) cid(2) type(1) + pad. A field in the
+wrong place connects to a different device, or to nothing."
+  (let ((mac (ble:parse-mac "D0:D1:D2:D3:D4:D5")))
+    (cffi:with-foreign-object (sa :unsigned-char 14)
+      (ble::%fill-sockaddr-l2 sa :bdaddr mac :bdaddr-type 1)
+      (let ((b (ble::foreign-to-bytes sa 14)))
+        (is (= 31 (ble:u16-le b 0)) "AF_BLUETOOTH")
+        (is (= 0 (ble:u16-le b 2)) "PSM is 0 for a fixed channel")
+        (is (equalp mac (subseq b 4 10)) "address, on-air order")
+        (is (= 4 (ble:u16-le b 10)) "ATT is CID 0x0004")
+        (is (= 1 (aref b 12)) "address type")))))

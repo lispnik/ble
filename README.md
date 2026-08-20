@@ -19,7 +19,7 @@ with no Bluetooth.
 
 ```sh
 make test    # portable suite (37 checks); runs anywhere, including macOS
-make check   # also the I/O layer's radio-free parts (68 more)
+make check   # also the I/O layer, driven by a scripted peer (104 more)
 ```
 
 ## What it gives you
@@ -101,6 +101,30 @@ index — correct for an ordinary 1M peripheral, and on at least one development
 Pi the built-in radio is the *only* one that hears the device while both
 dongles report nothing. `hciN` numbering also drifts across reboots, so
 resolve by bus and capability rather than assuming an index.
+
+## Testing against it, without a radio
+
+`make-att-test-channel` is a third kind of ATT channel, alongside the kernel
+L2CAP socket and the `hci-conn`: one backed by a function instead of a
+socket. `att-send` and `att-recv` dispatch on it like any other, so every line
+of ATT protocol runs unchanged against a scripted peer.
+
+```lisp
+(let ((chan (ble:make-att-test-channel
+             :responder (lambda (pdu)
+                          (when (= (aref pdu 0) #x0A)          ; Read Request
+                            (ble:coerce-octets #(#x0B #x2A))))))) ; Read Response
+  (ble:att-read-value chan #x000C))          ;  => #(42), NIL
+```
+
+`att-test-channel-sent-pdus` returns what went out, which for something like
+a range-scoped discovery is the only place the behaviour is visible at all.
+
+It ships in the library rather than the test suite because a consumer building
+its own GATT profile has the same problem. It also earns its keep: writing
+tests through it immediately found a walk that never terminated when a peer
+repeated itself, and an indication path that had been reported as implemented
+while half of the edit had silently failed to apply.
 
 ## A trap worth knowing
 
