@@ -102,17 +102,31 @@ HCI-SOCKET. Hand it back with CLOSE-HCI-USER-SOCKET."
           (let ((sock (make-hci-socket :fd fd :dev dev)))
             ;; Returns (values SOCK LE-ACL-DATA-PACKET-LENGTH).
             (values sock (hci-init-controller sock))))
-      (error (c) (%close fd) (error c)))))
+      (error (c)
+        (%close fd)
+        ;; HCIDEVDOWN already happened, so an error after it leaves the
+        ;; adapter down and unusable by anything else on the machine. Put it
+        ;; back before rethrowing.
+        (ignore-errors (hci-device-up dev))
+        (error c)))))
+
+(defun hci-device-up (dev)
+  "HCIDEVUP hci<DEV>, handing it back to the kernel.
+
+Its own function because there are two paths that owe the adapter back: a
+normal close, and a takeover that failed after the HCIDEVDOWN succeeded. The
+second one used to just close the socket and leave the radio down."
+  (let ((tmp (%socket +af-bluetooth+ +sock-raw+ +btproto-hci+)))
+    (when (>= tmp 0)
+      (%ioctl tmp +hcidevup+ dev)
+      (%close tmp))))
 
 (defun close-hci-user-socket (sock)
   "Release exclusive control and hand the adapter back to the kernel."
   (when (hci-socket-fd sock)
     (%close (hci-socket-fd sock))
     (setf (hci-socket-fd sock) nil)
-    (let ((tmp (%socket +af-bluetooth+ +sock-raw+ +btproto-hci+)))
-      (when (>= tmp 0)
-        (%ioctl tmp +hcidevup+ (hci-socket-dev sock))
-        (%close tmp)))))
+    (hci-device-up (hci-socket-dev sock))))
 
 (defun hci-do-command (sock ogf ocf params &key (timeout-ms 3000) name)
   "Send an HCI command and wait for its Command Complete. Returns the
@@ -376,13 +390,10 @@ INIT-PHYS is the initiating-PHY bitmask (bit0=1M, bit2=Coded).
 
 MTU defaults to 23 (no L2CAP fragmentation needed for short commands)."
   (let* ((peer-type (ecase addr-type (:public 0) (:random 1))))
-    (multiple-value-bind (sock acl-len) (open-hci-user-socket dev)
+    (let ((conn (hci-user-att-connect mac :addr-type addr-type :init-phys init-phys
+                                          :dev dev :timeout timeout :retries retries)))
     (handler-case
-        (let* ((handle (hci-le-create-connection
-                        sock mac peer-type :init-phys init-phys
-                        :timeout-ms (round (* 1000 timeout)) :retries retries))
-               (conn (make-hci-conn :sock sock :handle handle :acl-len acl-len))
-               (nus (make-nus :fd conn :mtu 23 :bdaddr-type peer-type)))
+        (let ((nus (make-nus :fd conn :mtu 23 :bdaddr-type peer-type)))
           ;; ATT setup reuses the nus.lisp protocol code over this transport.
           (setf (nus-mtu nus) (att-exchange-mtu conn mtu))
           (let ((chars (att-discover-characteristics conn)))
@@ -394,14 +405,13 @@ MTU defaults to 23 (no L2CAP fragmentation needed for short commands)."
             (setf (nus-cccd-handle nus)
                   (or (att-find-cccd conn (nus-tx-handle nus))
                       (1+ (nus-tx-handle nus))))
-            (let ((req (make-octets 5)))
-              (setf (aref req 0) +att-write-req+)
-              (u16le-put req 1 (nus-cccd-handle nus))
-              (u16le-put req 3 #x0001)
-              (att-request conn req :expect +att-write-rsp+)))
+            ;; ATT-SUBSCRIBE rather than a hand-rolled write whose result
+            ;; was discarded: a refused subscribe used to return a NUS that
+            ;; silently never received anything.
+            (att-subscribe conn (nus-cccd-handle nus)))
           nus)
       (error (c)
-        (ignore-errors (close-hci-user-socket sock))
+        (ignore-errors (att-channel-close conn))
         (error c))))))
 
 (defun hci-conn-close (conn)

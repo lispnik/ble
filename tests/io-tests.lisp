@@ -464,3 +464,55 @@ to commit, so a failure has to clean up after itself."
                                      (is (= 0 (aref pdu 1)))
                                      (hex->octets "19"))))))
     (is (eq t (ble:att-execute-write chan :cancel t)))))
+
+;;; --- regressions found by review ---------------------------------------
+
+(test characteristic-walk-rejects-an-impossible-record-length
+  "A characteristic record is decl(2) props(1) value(2) uuid(2+), so seven
+octets is the floor. Without a guard, each-len 0 spins forever and 1..6 walks
+off the end of the response. The service walk had this check; the
+characteristic walk did not."
+  (dolist (each '(0 1 6))
+    (let ((chan (scripted
+                 (cons #x08 (lambda (pdu)
+                              (declare (ignore pdu))
+                              (let ((rsp (ble:make-octets 8)))
+                                (setf (aref rsp 0) #x09
+                                      (aref rsp 1) each)
+                                rsp))))))
+      (finishes (ble:att-discover-characteristics chan))
+      (is (null (ble:att-discover-characteristics chan))
+          "each-len ~D must yield nothing, not a hang or a bounds error" each))))
+
+(test closing-a-nus-drops-it-from-the-open-channel-registry
+  "NUS-CLOSE used to close the fd directly, leaving a stale entry behind. An
+fd number gets reused, so the exit hook would later close whatever had since
+been handed that number."
+  (let* ((ble:*open-att-channels* nil)
+         (chan (ble:register-att-channel 4242))
+         (nus (ble::make-nus :fd chan :mtu 23)))
+    (is (equal '(4242) ble:*open-att-channels*))
+    ;; %close on a bogus fd fails harmlessly; the unregister is the point
+    (ignore-errors (ble:nus-close nus))
+    (is (null ble:*open-att-channels*)
+        "the channel must be gone from the registry, not merely closed")))
+
+(test the-mtu-we-advertise-is-the-mtu-we-answer-with
+  "A caller that asks for 247 and then answers a peer's own Exchange MTU
+Request with 23 leaves the two ends disagreeing about ATT_MTU, and the larger
+writes it believes are legal get silently dropped."
+  (let ((ble:*att-rx-mtu* 23))
+    (let ((chan (scripted (cons #x02 (lambda (pdu) (declare (ignore pdu))
+                                       (hex->octets "03" "F700"))))))
+      (ble:att-exchange-mtu chan 247)
+      (is (= 247 ble:*att-rx-mtu*) "we must remember what we advertised"))
+    ;; now a peer asks us, mid-exchange, and must hear the same number
+    (let ((chan (scripted (cons #x0A (lambda (pdu) (declare (ignore pdu))
+                                       (list (hex->octets "02" "F700")
+                                             (hex->octets "0B" "2A")))))))
+      (ble:att-read-value chan 12)
+      (let ((answer (find #x03 (ble:att-test-channel-sent-pdus chan)
+                          :key (lambda (p) (aref p 0)))))
+        (is-true answer "we should have answered the peer's MTU request")
+        (is (= 247 (ble:u16-le answer 1))
+            "and with the MTU we advertised, not the default")))))

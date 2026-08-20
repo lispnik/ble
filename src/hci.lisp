@@ -141,19 +141,24 @@ the form needed to bind an L2CAP source address to this adapter."
     (unwind-protect
          (progn
            (send-hci-command sock +ogf-info-params+ +ocf-read-bd-addr+ #())
-           (loop
-             (let ((pkt (read-hci-packet sock)))
-               (unless pkt (error "no response to Read_BD_ADDR on hci~D" dev))
-               ;; Command Complete: type(0x04) evt(0x0E) plen ncmd opcode(2)
-               ;; status(1) bd_addr(6)  -> bd_addr at offset 7..12
-               (when (and (>= (length pkt) 13)
-                          (= (aref pkt 0) +hci-event-pkt+)
-                          (= (aref pkt 1) +hci-cmd-complete-evt+)
-                          (= (u16-le pkt 4) opcode))
-                 (let ((status (aref pkt 6)))
-                   (unless (zerop status)
-                     (error "Read_BD_ADDR on hci~D failed (status 0x~2,'0X)" dev status))
-                   (return (subseq pkt 7 13)))))))
+           ;; Bounded: LIST-HCI-ADAPTERS calls this for every adapter under
+           ;; IGNORE-ERRORS, and IGNORE-ERRORS cannot rescue a blocked read.
+           ;; A controller that never answers should cost a second, not the
+           ;; process.
+           (loop repeat 20
+                 for pkt = (read-hci-packet sock :timeout-ms 100)
+                 ;; Command Complete: type(0x04) evt(0x0E) plen ncmd opcode(2)
+                 ;; status(1) bd_addr(6)  -> bd_addr at offset 7..12
+                 do (when (and pkt (>= (length pkt) 13)
+                               (= (aref pkt 0) +hci-event-pkt+)
+                               (= (aref pkt 1) +hci-cmd-complete-evt+)
+                               (= (u16-le pkt 4) opcode))
+                      (let ((status (aref pkt 6)))
+                        (unless (zerop status)
+                          (error "Read_BD_ADDR on hci~D failed (status 0x~2,'0X)"
+                                 dev status))
+                        (return (subseq pkt 7 13))))
+                 finally (error "no response to Read_BD_ADDR on hci~D" dev)))
       (close-hci-socket sock))))
 
 (defun hci-set-default-phy (&key (dev 0) (tx-phys #x05) (rx-phys #x05))

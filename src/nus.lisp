@@ -117,6 +117,12 @@ timeout. Leaves FD in blocking mode on success."
                 (let ((pr (%poll pfd 1 timeout-ms)))
                   (cond
                     ((zerop pr) (error "connect(L2CAP) timed out after ~Dms" timeout-ms))
+                    ;; EINTR is a signal the runtime delivered, not a failed
+                    ;; connect. Everywhere else here treats it as "nothing
+                    ;; yet"; this was the one place that turned a GC pause
+                    ;; into a connection error.
+                    ((and (< pr 0) (= (errno) +eintr+))
+                     (error "connect(L2CAP) interrupted by a signal; retry"))
                     ((< pr 0) (check-syscall pr "poll"))
                     (t (cffi:with-foreign-object (err :int)
                          ;; 'socklen must be quoted: with-foreign-object/mem-ref
@@ -125,7 +131,9 @@ timeout. Leaves FD in blocking mode on success."
                          (cffi:with-foreign-object (len 'socklen)
                            (setf (cffi:mem-ref len 'socklen) 4
                                  (cffi:mem-ref err :int) 0)
-                           (%getsockopt fd +sol-socket+ +so-error+ err len)
+                           (check-syscall
+                            (%getsockopt fd +sol-socket+ +so-error+ err len)
+                            "getsockopt(SO_ERROR)")
                            (let ((so-err (cffi:mem-ref err :int)))
                              (unless (zerop so-err)
                                (error "connect(L2CAP) failed: ~A (errno ~D)"
@@ -477,7 +485,11 @@ NIL, the first non-skipped PDU is returned."
                  ((= op +att-exchange-mtu-req+)             ; peer-initiated MTU: answer
                   (let ((r (make-octets 3)))
                     (setf (aref r 0) +att-exchange-mtu-rsp+)
-                    (u16le-put r 1 *att-rx-mtu*)            ; our rx MTU
+                    ;; The number we advertised, not the default: a caller
+                    ;; that asked for 247 and then answers 23 leaves the two
+                    ;; ends disagreeing about ATT_MTU, and the larger writes
+                    ;; it believes are legal get dropped.
+                    (u16le-put r 1 *att-rx-mtu*)
                     (att-send chan r)))
                  ((= op +att-error-rsp+) (return rsp))
                  ((or (null expect) (= op expect)) (return rsp))
@@ -506,6 +518,11 @@ is most of them -- do not have to have one."
   (let ((req (make-octets 3)))
     (setf (aref req 0) +att-exchange-mtu-req+)
     (u16le-put req 1 client-mtu)
+    ;; Remember what we advertised. The peer may send its own Exchange MTU
+    ;; Request later, and ATT-REQUEST has to answer it with the same value --
+    ;; process-global, which is honest for a library whose transports carry
+    ;; one connection at a time.
+    (setf *att-rx-mtu* client-mtu)
     (let ((rsp (att-request chan req :expect +att-exchange-mtu-rsp+)))
       (if (and rsp (= (aref rsp 0) +att-exchange-mtu-rsp+))
           (max 23 (min client-mtu (u16-le rsp 1)))
@@ -750,6 +767,10 @@ since ATT has no other notion of membership."
           ;; rsp: opcode(1) each-len(1) then entries of each-len bytes:
           ;;   decl-handle(2) properties(1) value-handle(2) uuid(2 or 16)
           (let ((each (aref rsp 1)) (i 2) (last 0))
+            ;; A characteristic record is decl(2) props(1) value(2) uuid(2+),
+            ;; so seven octets is the floor. Without this, each-len 0 spins
+            ;; forever and 1..6 walks off the end of the response.
+            (when (< each 7) (return))
             (loop while (<= (+ i each) (length rsp)) do
               (let ((decl-handle (u16-le rsp i)))
                 (push (make-gatt-char :handle (u16-le rsp (+ i 3))
@@ -833,8 +854,10 @@ NUS-CLOSE to tear down."
 (defun nus-close (conn)
   "Close the NUS connection (dispatches on the transport)."
   (let ((chan (nus-fd conn)))
-    (cond ((integerp chan) (%close chan))
-          (chan (hci-conn-close chan)))   ; HCI transport (hci-conn.lisp)
+    ;; Via ATT-CHANNEL-CLOSE, which also drops it from *OPEN-ATT-CHANNELS*.
+    ;; Closing the fd directly left a stale entry there, and an fd number is
+    ;; reused -- so the exit hook would later close whatever now held it.
+    (when chan (att-channel-close chan))
     (setf (nus-fd conn) nil)))
 
 (defun nus-send (conn data)
