@@ -418,3 +418,61 @@ wrong place connects to a different device, or to nothing."
         (is (equalp mac (subseq b 4 10)) "address, on-air order")
         (is (= 4 (ble:u16-le b 10)) "ATT is CID 0x0004")
         (is (= 1 (aref b 12)) "address type")))))
+
+;;; --- read multiple and long writes -------------------------------------
+
+(test read-multiple-packs-handles-and-returns-values-concatenated
+  "ATT sends the values back with no lengths and no delimiters, which is the
+whole caveat on this operation."
+  (let ((chan (scripted
+               (cons #x0E (lambda (pdu)
+                            (is (= 5 (length pdu)) "opcode plus two handles")
+                            (is (= #x000C (ble:u16-le pdu 1)))
+                            (is (= #x000E (ble:u16-le pdu 3)))
+                            (hex->octets "0F" "AABB" "CC"))))))
+    (multiple-value-bind (value error) (ble:att-read-multiple chan '(#x0C #x0E))
+      (is (null error))
+      (is (equalp (hex->octets "AABBCC") value)))))
+
+(test long-write-chunks-by-mtu-and-offsets-each-part
+  (let* ((prepared '())
+         (executed nil)
+         (chan (scripted
+                (cons #x16 (lambda (pdu)
+                             (push (cons (ble:u16-le pdu 3) (subseq pdu 5)) prepared)
+                             ;; echo handle, offset and part back
+                             (concatenate '(vector (unsigned-byte 8))
+                                          (hex->octets "17") (subseq pdu 1))))
+                (cons #x18 (lambda (pdu)
+                             (setf executed (aref pdu 1))
+                             (hex->octets "19"))))))
+    ;; MTU 9 leaves 4 octets per part (opcode + handle + offset = 5)
+    (is (eq t (ble:att-write-long-value chan #x000C (hex->octets "0102030405060708090A")
+                                        :mtu 9)))
+    (setf prepared (reverse prepared))
+    (is (equal '(0 4 8) (mapcar #'car prepared)) "offsets advance by the chunk size")
+    (is (equalp (hex->octets "01020304") (cdr (first prepared))))
+    (is (equalp (hex->octets "090A") (cdr (third prepared))) "short final part")
+    (is (= 1 executed) "flags = 1 commits the queue")))
+
+(test a-failed-long-write-cancels-the-queue-it-left-behind
+  "Leaving prepared writes queued hands the next client a half-written value
+to commit, so a failure has to clean up after itself."
+  (let* ((executed nil)
+         (chan (scripted
+                (cons #x16 (lambda (pdu) (declare (ignore pdu))
+                             ;; Invalid Offset on the very first part
+                             (hex->octets "01" "16" "0C00" "07")))
+                (cons #x18 (lambda (pdu)
+                             (setf executed (aref pdu 1))
+                             (hex->octets "19"))))))
+    (is (= 7 (ble:att-write-long-value chan #x000C (hex->octets "0102030405")
+                                       :mtu 9))
+        "the ATT error code is returned, not swallowed")
+    (is (= 0 executed) "flags = 0 cancels")))
+
+(test execute-write-can-cancel-explicitly
+  (let ((chan (scripted (cons #x18 (lambda (pdu)
+                                     (is (= 0 (aref pdu 1)))
+                                     (hex->octets "19"))))))
+    (is (eq t (ble:att-execute-write chan :cancel t)))))

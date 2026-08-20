@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Native, and the job that gates a pull request in practice.
+  linux-x86_64:
+    name: linux/x86_64 · sbcl
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SBCL
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends sbcl
+
+      # ocicl builds itself with sbcl, which is slow and never changes
+      # between runs. The dependency tree is keyed on ocicl.csv because that
+      # file pins every system by digest -- if it has not changed, neither
+      # have the bytes underneath it.
+      - name: Cache ocicl
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/bin
+            ~/.local/share/ocicl
+          key: ocicl-x86_64-v1
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: ocicl
+          key: deps-x86_64-${{ hashFiles('ocicl.csv') }}
+
+      - name: Test
+        run: ci/test.sh
+
+  # Emulated. These repositories are private and GitHub's native arm64
+  # runners are not available on this plan, so aarch64 is covered under QEMU.
+  # It is slow -- minutes, not seconds -- and it is here anyway because
+  # aarch64 is where this library actually runs: the target is a Raspberry Pi,
+  # and the parts most likely to differ by architecture are exactly the parts
+  # this library is made of, foreign struct layouts and octet-order handling.
+  linux-aarch64:
+    name: linux/aarch64 · sbcl (qemu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Cache ocicl and dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            .ci-home
+            ocicl
+          key: aarch64-${{ hashFiles('ocicl.csv') }}-v1
+          restore-keys: aarch64-
+
+      - name: Test under aarch64
+        run: |
+          mkdir -p .ci-home
+          docker run --rm --platform linux/arm64 \
+            -v "$PWD":/src -w /src \
+            -e HOME=/src/.ci-home \
+            debian:bookworm-slim \
+            bash -c 'ci/test.sh'
+
+      # The cache action cannot write files root created inside the container.
+      - name: Fix cache permissions
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" .ci-home ocicl || true

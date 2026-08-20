@@ -114,6 +114,10 @@
           att-read-characteristic
           value-may-be-truncated-p
           att-write-value
+          att-read-multiple
+          att-prepare-write
+          att-execute-write
+          att-write-long-value
           att-write-command
           att-subscribe
           att-next-notification

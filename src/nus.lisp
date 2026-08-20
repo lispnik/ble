@@ -55,6 +55,12 @@
 (defconstant +att-read-req+          #x0A)
 (defconstant +att-read-rsp+          #x0B)
 (defconstant +att-read-blob-req+     #x0C)
+(defconstant +att-read-multiple-req+ #x0E)
+(defconstant +att-read-multiple-rsp+ #x0F)
+(defconstant +att-prepare-write-req+ #x16)
+(defconstant +att-prepare-write-rsp+ #x17)
+(defconstant +att-execute-write-req+ #x18)
+(defconstant +att-execute-write-rsp+ #x19)
 (defconstant +att-read-blob-rsp+     #x0D)
 (defconstant +att-read-by-type-req+  #x08)
 (defconstant +att-read-by-type-rsp+  #x09)
@@ -365,6 +371,80 @@ boundary, so what has been read is complete and is returned."
              (when (< (length chunk) (- mtu 1)) (return)))))))
     (values (if (> (length value) max-length) (subseq value 0 max-length) value)
             nil)))
+
+(defun att-read-multiple (chan handles)
+  "Read several attributes in one round trip. Returns (VALUES OCTETS ERROR).
+
+The response is the values CONCATENATED, with no lengths and no delimiters --
+ATT assumes the client already knows how wide each attribute is. If you do
+not, this tells you less than reading them one at a time, and reading them
+one at a time is then the right call. Offered because when you do know, it
+turns N round trips into one."
+  (let* ((handles (coerce handles 'list))
+         (pdu (make-octets (+ 1 (* 2 (length handles))))))
+    (setf (aref pdu 0) +att-read-multiple-req+)
+    (loop for h in handles
+          for i from 1 by 2
+          do (u16le-put pdu i h))
+    (let ((rsp (att-request chan pdu :expect +att-read-multiple-rsp+)))
+      (cond ((null rsp) (values nil :timeout))
+            ((att-error-p rsp) (values nil (when (>= (length rsp) 5) (aref rsp 4))))
+            (t (values (subseq rsp 1) nil))))))
+
+;;; --- long writes ------------------------------------------------------
+
+(defun att-prepare-write (chan handle offset part)
+  "Queue PART of a value at OFFSET on the peer. Returns (VALUES ECHO ERROR).
+
+The peer echoes back what it queued, and the echo is worth checking: it is
+the only confirmation that the offset and the bytes arrived as sent, and a
+queue that has gone wrong is still sitting there waiting to be executed."
+  (let* ((part (coerce-octets part))
+         (pdu (make-octets (+ 5 (length part)))))
+    (setf (aref pdu 0) +att-prepare-write-req+)
+    (u16le-put pdu 1 handle)
+    (u16le-put pdu 3 offset)
+    (replace pdu part :start1 5)
+    (let ((rsp (att-request chan pdu :expect +att-prepare-write-rsp+)))
+      (cond ((null rsp) (values nil :timeout))
+            ((att-error-p rsp) (values nil (when (>= (length rsp) 5) (aref rsp 4))))
+            (t (values (subseq rsp 1) nil))))))
+
+(defun att-execute-write (chan &key cancel)
+  "Commit the queued prepared writes, or discard them with CANCEL.
+
+Returns T, :TIMEOUT, or the ATT error code. Cancelling matters: a failed long
+write leaves a queue on the peer, and the next client to prepare a write
+inherits it."
+  (let ((pdu (make-octets 2)))
+    (setf (aref pdu 0) +att-execute-write-req+
+          (aref pdu 1) (if cancel 0 1))
+    (let ((rsp (att-request chan pdu :expect +att-execute-write-rsp+)))
+      (cond ((null rsp) :timeout)
+            ((att-error-p rsp) (when (>= (length rsp) 5) (aref rsp 4)))
+            (t t)))))
+
+(defun att-write-long-value (chan handle value &key (mtu *att-rx-mtu*))
+  "Write VALUE to HANDLE however long it is, via Prepare Write and Execute
+Write. Returns T, :TIMEOUT, or an ATT error code.
+
+A plain Write Request carries at most MTU-3 octets, which is 20 at the
+default MTU -- this is how you write more. Each part is queued with its
+offset and nothing takes effect until the execute, so a value arrives whole
+or not at all.
+
+On any failure the queue is CANCELLED before returning. Leaving it would hand
+the next client a half-written value to commit."
+  (let* ((value (coerce-octets value))
+         (chunk (max 1 (- mtu 5))))          ; opcode + handle + offset
+    (loop for offset from 0 below (max 1 (length value)) by chunk
+          for part = (subseq value offset (min (length value) (+ offset chunk)))
+          do (multiple-value-bind (echo error) (att-prepare-write chan handle offset part)
+               (declare (ignore echo))
+               (when error
+                 (att-execute-write chan :cancel t)
+                 (return-from att-write-long-value error))))
+    (att-execute-write chan)))
 
 (defun att-read-characteristic (chan chars uuid &key long (mtu *att-rx-mtu*))
   "Read the characteristic in CHARS whose UUID matches, in one step.
