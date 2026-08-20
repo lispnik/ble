@@ -1,5 +1,7 @@
 # ble
 
+[![CI](https://github.com/lispnik/ble/actions/workflows/ci.yml/badge.svg)](https://github.com/lispnik/ble/actions/workflows/ci.yml)
+
 A Bluetooth Low Energy library for SBCL on Linux: HCI sockets, adapter
 enumeration, LE scanning, extended advertising, and an ATT/GATT client that
 speaks over either of two transports.
