@@ -516,3 +516,64 @@ writes it believes are legal get silently dropped."
         (is-true answer "we should have answered the peer's MTU request")
         (is (= 247 (ble:u16-le answer 1))
             "and with the MTU we advertised, not the default")))))
+
+;;; --- L2CAP reassembly ---------------------------------------------------
+;;;
+;;; These drive %DRAIN-L2CAP-FRAMES directly. It is the half of
+;;; HCI-ACL-RECV-ATT that does not need a socket, and it is where the
+;;; interesting mistakes are: what happens to a second frame, and to a partial
+;;; one. The bug these pin down dropped every frame after the first in a read.
+
+(defun l2cap-frame (cid payload-hex)
+  "One L2CAP B-frame: 2-octet length, 2-octet CID, payload."
+  (let* ((payload (hex->octets payload-hex))
+         (out (ble:make-octets (+ 4 (length payload)))))
+    (ble:u16le-put out 0 (length payload))
+    (ble:u16le-put out 2 cid)
+    (replace out payload :start1 4)
+    out))
+
+(defun drained (&rest frames)
+  "Feed FRAMES to a fresh conn's buffer, drain, and return (VALUES PENDING REMAINDER)."
+  (let ((conn (ble::make-hci-conn
+               :rxbuf (apply #'concatenate '(simple-array (unsigned-byte 8) (*))
+                             frames))))
+    (ble::%drain-l2cap-frames conn)
+    (values (ble::hci-conn-pending conn) (ble::hci-conn-rxbuf conn))))
+
+(test two-att-frames-in-one-read-both-survive
+  "A reply to a command and a periodic notification can complete in the same
+read. Taking one frame and clearing the buffer threw the other away."
+  (multiple-value-bind (pending remainder)
+      (drained (l2cap-frame 4 "1B0C00AA") (l2cap-frame 4 "1B0C00BB"))
+    (is (= 2 (length pending)) "both frames must be queued")
+    (is (equalp (hex->octets "1B0C00AA") (first pending)))
+    (is (equalp (hex->octets "1B0C00BB") (second pending))
+        "and in arrival order")
+    (is (zerop (length remainder)) "nothing left over")))
+
+(test a-non-att-frame-does-not-swallow-the-att-frame-behind-it
+  "Draining must skip a frame on another CID and keep going, not stop."
+  (multiple-value-bind (pending) (drained (l2cap-frame 5 "DEADBEEF")
+                                          (l2cap-frame 4 "1B0C0042"))
+    (is (= 1 (length pending)) "the signalling frame is not an ATT PDU")
+    (is (equalp (hex->octets "1B0C0042") (first pending))
+        "but the ATT frame behind it must still arrive")))
+
+(test a-partial-frame-is-kept-for-the-next-fragment
+  "The remainder is what the continuation fragment gets appended to."
+  (let ((whole (l2cap-frame 4 "1B0C00AA")))
+    (multiple-value-bind (pending remainder)
+        (drained (l2cap-frame 4 "1B0C00BB") (subseq whole 0 3))
+      (is (= 1 (length pending)) "only the complete frame comes out")
+      (is (equalp (subseq whole 0 3) remainder)
+          "the partial one stays buffered, byte for byte"))))
+
+(test draining-an-empty-or-header-only-buffer-is-harmless
+  (multiple-value-bind (pending remainder) (drained (ble:make-octets 0))
+    (is (null pending))
+    (is (zerop (length remainder))))
+  ;; three octets cannot even carry an L2CAP header
+  (multiple-value-bind (pending remainder) (drained (hex->octets "040000"))
+    (is (null pending))
+    (is (= 3 (length remainder)) "kept until the rest of the header arrives")))

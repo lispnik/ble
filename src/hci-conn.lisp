@@ -163,8 +163,10 @@ and learn the LE ACL buffer size. Returns the LE ACL data packet length."
 (defstruct hci-conn
   "An LE connection we own via an HCI_CHANNEL_USER socket. CHAN slot in a
 NUS holds one of these for the HCI transport; RXBUF accumulates ACL
-fragments during L2CAP reassembly."
-  sock handle acl-len (rxbuf (make-octets 0)))
+fragments during L2CAP reassembly, and PENDING holds ATT PDUs that were
+reassembled but not yet asked for -- a single read can complete more than
+one, and the surplus has to survive until the next call."
+  sock handle acl-len (rxbuf (make-octets 0)) (pending '()))
 
 (defun %await-le-connection (sock opcode timeout-ms)
   "Wait up to TIMEOUT-MS (a wall-clock deadline) for the (Enhanced)
@@ -325,9 +327,36 @@ more HCI ACL data packets to the connection."
              (setf off end)
           while (< off total))))
 
+(defun %drain-l2cap-frames (conn)
+  "Pull every complete L2CAP frame out of CONN's reassembly buffer, queueing
+the ATT ones on PENDING and leaving any partial frame behind.
+
+Draining in a loop, and keeping the remainder, is load-bearing rather than
+tidy. This used to take one frame per read and then clear the buffer, so a
+read that completed two frames silently dropped the second -- and two at once
+is not exotic here: it is what happens when a reply to a command lands in the
+same instant as one of the peer's periodic notifications, which is precisely
+when losing it costs the most."
+  (loop
+    (let ((buf (hci-conn-rxbuf conn)))
+      (when (< (length buf) 4) (return))
+      (let ((l2len (u16-le buf 0)))
+        (when (< (length buf) (+ 4 l2len)) (return))
+        (let ((cid (u16-le buf 2))
+              (frame (subseq buf 4 (+ 4 l2len))))
+          (setf (hci-conn-rxbuf conn) (subseq buf (+ 4 l2len)))
+          (when (= cid +att-cid+)
+            (setf (hci-conn-pending conn)
+                  (nconc (hci-conn-pending conn) (list frame)))))))))
+
 (defun hci-acl-recv-att (conn timeout-ms)
   "Read until a complete ATT PDU arrives on the ATT CID; reassembles ACL
 fragments. Returns the ATT PDU octets, NIL on timeout, or :DISCONNECTED."
+  ;; Anything a previous call reassembled but did not hand back comes first,
+  ;; before going near the socket -- otherwise a queued PDU could sit behind a
+  ;; timeout that has nothing to do with it.
+  (when (hci-conn-pending conn)
+    (return-from hci-acl-recv-att (pop (hci-conn-pending conn))))
   (loop
     (let ((pkt (hci-poll-read (hci-conn-sock conn) timeout-ms)))
       (unless pkt (return nil))
@@ -341,20 +370,17 @@ fragments. Returns the ATT PDU octets, NIL on timeout, or :DISCONNECTED."
                   (pb (logand (ash flags -12) #x3))
                   (acl-len (u16-le pkt 3))
                   (data (subseq pkt 5 (min (length pkt) (+ 5 acl-len)))))
+             ;; pb #x01 continues the frame in progress; anything else starts
+             ;; a new one, and whatever was buffered was a partial we will
+             ;; never be able to complete.
              (setf (hci-conn-rxbuf conn)
                    (if (= pb #x01)
                        (concatenate '(simple-array (unsigned-byte 8) (*))
                                     (hci-conn-rxbuf conn) data)
                        (coerce-octets data)))
-             (let ((buf (hci-conn-rxbuf conn)))
-               (when (>= (length buf) 4)
-                 (let ((l2len (u16-le buf 0)))
-                   (when (>= (length buf) (+ 4 l2len))
-                     (let ((cid (u16-le buf 2))
-                           (att (subseq buf 4 (+ 4 l2len))))
-                       (setf (hci-conn-rxbuf conn) (make-octets 0))
-                       (when (= cid +att-cid+)
-                         (return att))))))))))))))
+             (%drain-l2cap-frames conn)
+             (when (hci-conn-pending conn)
+               (return (pop (hci-conn-pending conn)))))))))))
 
 ;;; --- top-level: NUS over the HCI_CHANNEL_USER transport ----------------
 
