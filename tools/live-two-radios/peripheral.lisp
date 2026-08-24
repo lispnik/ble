@@ -95,7 +95,7 @@
             (format t "~&[peripheral] no central attached~%")
             (let ((conn (make-hci-conn :sock sock :handle handle
                                        :acl-len (hci-socket-acl-len sock)))
-                  (served 0) (sent 0))
+                  (served 0) (sent 0) (param-ident nil) (param-result nil))
               (format t "~&[peripheral] connected, handle 0x~4,'0X~%" handle)
               (force-output)
               ;; Serve until the client leaves or the deadline passes, and
@@ -120,6 +120,27 @@
                            (format t "~&[peripheral] client went away~%")
                            (return))
                           (op (incf served))))
+                  ;; Once the link is warm, ask the central for a slower
+                  ;; interval. A peripheral cannot change it itself -- only
+                  ;; the central issues LE Connection Update -- so this goes
+                  ;; over the L2CAP signalling channel as a request.
+                  ;;
+                  ;; Send and carry on serving: the answer is picked up by
+                  ;; this same loop. Blocking here to wait for it would eat
+                  ;; the central's requests, which is exactly what it did.
+                  (when (= i 40)
+                    (setf param-ident
+                          (l2cap-request-conn-params
+                           conn :min-interval-ms 200 :max-interval-ms 300
+                                :supervision-timeout-ms 6000))
+                    (format t "~&[peripheral] asked for a 200-300 ms interval~%")
+                    (force-output))
+                  (when (and param-ident (null param-result))
+                    (let ((r (l2cap-conn-param-result conn param-ident)))
+                      (when r
+                        (setf param-result r)
+                        (format t "~&[peripheral] parameter update -> ~A~%" r)
+                        (force-output))))
                   (when (zerop (mod (incf i) 4))
                     (when (gatt-notify server conn ffe1
                                        (vector #xA0 (mod i 256)) :cccd-handle cccd1)
@@ -127,8 +148,9 @@
                     (when (gatt-notify server conn ffe2
                                        (vector #xB0 (mod i 256)) :cccd-handle cccd2)
                       (incf sent)))))
-              (format t "~&[peripheral] answered ~D requests, sent ~D notifications~%"
-                      served sent)
+              (format t "~&[peripheral] answered ~D requests, sent ~D notifications, ~
+                         parameter update ~A~%"
+                      served sent (or param-result :none))
               (force-output)))))))
 (format t "~&[peripheral] adapter handed back~%")
 (sb-ext:exit)

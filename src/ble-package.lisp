@@ -219,6 +219,18 @@
           interval-units-to-ms
           ms-to-timeout-units
           timeout-units-to-ms
+          ;; L2CAP signalling: how a peripheral asks for new parameters
+          ;; (src/l2cap-signalling.lisp)
+          l2cap-request-conn-params
+          l2cap-answer-conn-param-request
+          l2cap-serve-signalling
+          parse-conn-param-request
+          *l2cap-accept-conn-param-updates*
+          hci-acl-send-l2cap
+          hci-conn-sig-pending
+          hci-conn-sig-results
+          l2cap-conn-param-result
+          *l2cap-signalling-handler*
           ;; Giving the adapter back (src/teardown.lisp)
           *open-att-channels*
           register-att-channel

@@ -37,6 +37,7 @@
 
 (defconstant +sock-seqpacket+   5)   ; each send/recv is one ATT PDU
 (defconstant +att-cid+          #x0004)
+(defconstant +l2cap-sig-cid+    #x0005)
 ;; sockaddr address-type values (NOT the HCI 0/1 advertising addr-type)
 (defconstant +bdaddr-le-public+ 1)
 (defconstant +bdaddr-le-random+ 2)

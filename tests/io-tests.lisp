@@ -1215,3 +1215,36 @@ fragment, so it has to be the value, not just an acknowledgement."
   (is (= 5000 (ble:timeout-units-to-ms 500))
       "500 units is five seconds, which is the number that trips people up")
   (is (= 10 (ble:ms-to-timeout-units 1)) "clamped to the minimum"))
+
+;;; --- L2CAP signalling ---------------------------------------------------
+;;;
+;;; The wire format is pure, so it gets checked here; the exchange itself
+;;; needs two radios and lives in tools/live-two-radios/.
+
+(test a-connection-parameter-request-decodes-to-milliseconds
+  "The request carries intervals in 1.25 ms units and the timeout in 10 ms
+ones, which is the same trap as everywhere else on this boundary."
+  (let ((frame (ble:make-octets 12)))
+    (setf (aref frame 0) #x12)          ; Connection Parameter Update Request
+    (setf (aref frame 1) 7)             ; identifier
+    (ble:u16le-put frame 2 8)           ; length
+    (ble:u16le-put frame 4 (ble:ms-to-interval-units 100))
+    (ble:u16le-put frame 6 (ble:ms-to-interval-units 200))
+    (ble:u16le-put frame 8 4)           ; latency
+    (ble:u16le-put frame 10 (ble:ms-to-timeout-units 6000))
+    (multiple-value-bind (min-ms max-ms latency timeout-ms)
+        (ble:parse-conn-param-request frame)
+      (is (= 100 min-ms))
+      (is (= 200 max-ms))
+      (is (= 4 latency))
+      (is (= 6000 timeout-ms) "six seconds, not six hundred"))))
+
+(test a-frame-that-is-not-a-parameter-request-is-not-decoded-as-one
+  (let ((reject (ble:make-octets 12)))
+    (setf (aref reject 0) #x01)         ; Command Reject
+    (is (null (ble:parse-conn-param-request reject))
+        "only the request opcode may be parsed as a request"))
+  (let ((truncated (ble:make-octets 6)))
+    (setf (aref truncated 0) #x12)
+    (is (null (ble:parse-conn-param-request truncated))
+        "and a frame too short to hold four parameters is refused")))

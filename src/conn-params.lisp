@@ -72,11 +72,20 @@ same path an ordinary read uses, so a subscriber sees them afterwards."
                                         (hci-conn-rxbuf conn) data)
                            (coerce-octets data)))
                  (%drain-l2cap-frames conn)
-                 ;; Anything reassembled here is server-initiated by
-                 ;; definition -- we are not mid-request -- so hand it to the
-                 ;; notification queue.
-                 (loop for pdu = (pop (hci-conn-pending conn))
-                       while pdu do (%att-note-server-pdu conn pdu)))))
+                 (%maybe-serve-signalling conn)
+                 ;; Notifications go to the notification queue; anything else
+                 ;; stays where the ATT layer will look for it. Taking the lot
+                 ;; was wrong: a request can be in flight while the host waits
+                 ;; for an event, and its response was being dropped here --
+                 ;; which presented as a long write timing out for no visible
+                 ;; reason.
+                 (let ((keep '()))
+                   (loop for pdu = (pop (hci-conn-pending conn))
+                         while pdu
+                         do (unless (%att-note-server-pdu conn pdu)
+                              (push pdu keep)))
+                   (setf (hci-conn-pending conn)
+                         (nconc (nreverse keep) (hci-conn-pending conn)))))))
             ((/= (aref pkt 0) #x04) nil)         ; not an event
             ((and (>= (length pkt) 2) (= (aref pkt 1) +hci-disconn-complete-evt+))
              (return :disconnected))
@@ -88,7 +97,7 @@ same path an ordinary read uses, so a subscriber sees them afterwards."
 (defun hci-connection-update (conn &key (min-interval-ms 30) (max-interval-ms 50)
                                         (latency 0) (supervision-timeout-ms 4000)
                                         (min-ce 0) (max-ce 0) handle
-                                        (timeout-ms 8000))
+                                        (timeout-ms 8000) (await t))
   "Ask the controller to renegotiate the connection parameters.
 
 Returns (VALUES INTERVAL-MS LATENCY TIMEOUT-MS) once the peer agrees, or
@@ -110,6 +119,11 @@ running at."
     (u16le-put params 10 min-ce)
     (u16le-put params 12 max-ce)
     (send-hci-command sock +ogf-le+ +ocf-le-connection-update+ params)
+    ;; AWAIT NIL issues the command and returns. The completion event arrives
+    ;; whenever the peer gets round to it, and a caller that is inside its own
+    ;; read loop -- answering a peer's request, say -- must not stall there
+    ;; for it: everything else on the link stops while it does.
+    (unless await (return-from hci-connection-update :requested))
     (let ((evt (%await-hci-event conn :event +hci-le-meta-evt+
                                       :subevent +le-conn-update-complete-evt+
                                       :timeout-ms timeout-ms)))

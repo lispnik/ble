@@ -147,6 +147,27 @@ the ones asked for — the peer may answer anywhere inside the range. Using the
 requested numbers afterwards is how a link ends up being driven at an interval
 it is not running at.
 
+## When the peripheral wants different parameters
+
+Only the central issues LE Connection Update, so a peripheral that wants a
+slower link has to ask. That request goes over the L2CAP signalling channel
+(CID 0x0005), not HCI: `l2cap-request-conn-params` sends one and returns an
+identifier, and `l2cap-conn-param-result` collects the answer.
+
+It sends without waiting, deliberately. Waiting means reading from the
+transport, and on a peripheral the PDUs arriving are the central's requests —
+so a blocking version swallows the very traffic the caller exists to serve.
+Mine did, and it broke a long write that happened to overlap the request.
+Whoever owns the read loop keeps owning it.
+
+The answering side needs nothing: incoming signalling frames are handled from
+the ordinary receive path via `*l2cap-signalling-handler*`, so a program using
+this library answers a peer's request whether or not it knows the channel
+exists. That matters because silence is indistinguishable, from the far end,
+from the frames being dropped — which is what happened to every non-ATT CID
+before this. Bind `*l2cap-accept-conn-param-updates*` to NIL to refuse, or the
+handler itself to NIL to take the channel over.
+
 ## Resource-safe wrappers
 
 `with-hci-socket`, `with-hci-user-socket`, `with-att-channel`, `with-nus`,
@@ -204,6 +225,10 @@ Not implemented:
   that requires a bonded link. The largest remaining gap by a distance.
 - **LE privacy** (resolving list, RPA) and the controller filter-accept-list.
 - **Read Multiple Variable Length** (0x20, from 5.2), refused as unsupported.
+  Older Read Multiple returns values concatenated with no delimiters, so a
+  client cannot split them without already knowing each length; 0x20 prefixes
+  each with its length and fixes that. Low priority: anything it does can be
+  done with separate reads, and **it cannot be tested here** — see below.
 - **L2CAP connection-oriented channels**, so no high-throughput transfers.
 - **Signed Writes.** Verifying one needs a CSRK, which is distributed by
   bonding, which needs SMP. Until that exists the only honest thing to do with
@@ -281,6 +306,15 @@ from a deliberately downed adapter, all 25/25.
 
 `PERIPH_DEV`, `CENTRAL_DEV` and `PEER_MAC` override the choice if you need a
 particular pairing; `PERIPH_SECONDS` bounds how long the peripheral serves.
+
+**The dongles are Bluetooth 5.1.** Both report core version `0x0A`,
+manufacturer 93 — Realtek, the RTL8761B in a TP-Link UB500. So nothing from
+5.2 or later can be exercised here at all, whatever the code does: Read
+Multiple Variable Length (0x20), Enhanced ATT bearers, LE Power Control, and
+the 5.2 parts of the feature bitmap are all out of reach. **Testing those
+needs two dongles newer than 5.2**, and until there are some, treat any claim
+about them as unverified — the live harness is the only thing here that has
+ever caught a protocol bug the suite missed, and it cannot catch these.
 
 `compile-check.lisp` beside them needs no hardware at all: it loads every
 definition, compiles the forms that drive the radios without running them, and

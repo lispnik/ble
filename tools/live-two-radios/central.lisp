@@ -22,6 +22,16 @@
 
 (ble:install-adapter-teardown)
 
+;;; Watch every signalling frame for the whole run rather than for a window:
+;;; the peer asks when it is ready, not when this script is looking.
+(defvar *seen-param-requests* '())
+(setf ble:*l2cap-signalling-handler*
+      (lambda (conn)
+        (dolist (f (ble:hci-conn-sig-pending conn))
+          (multiple-value-bind (mn mx lat to) (ble:parse-conn-param-request f)
+            (when mn (push (list mn mx lat to) *seen-param-requests*))))
+        (ble:l2cap-serve-signalling conn)))
+
 (let ((fails 0) (checks 0))
   (labels ((check (ok label)
              (incf checks)
@@ -200,6 +210,32 @@
         ;; The link still works afterwards, which is the part that matters.
         (check (equalp #(9 9) (ble:att-read-value chan (ble:gatt-char-handle ffe1)))
                "and the connection still serves reads at the new parameters")
+
+        ;; --- the peer's own parameter request -------------------------------
+        ;; The peripheral asks for a slower interval partway through its run.
+        ;; Answering happens inside the ordinary receive path, so all this
+        ;; side has to do is keep reading; what it checks is that the request
+        ;; was seen, answered, and acted on.
+        (progn
+          ;; Keep reading until the request turns up. The observer was
+          ;; installed for the whole run (see *seen-param-requests*), because
+          ;; the peer sends on its own schedule and a window bound around one
+          ;; section of the test simply missed it.
+          (dotimes (i 40)
+            (when *seen-param-requests* (return))
+            (ble:att-next-notification-any chan 500))
+          (let ((seen *seen-param-requests*))
+          (format t "~&[central] parameter requests seen: ~A~%" seen)
+          (check (= 1 (length seen)) "the peer's request arrived and was parsed")
+          (when seen
+            (destructuring-bind (mn mx lat to) (first seen)
+              (declare (ignore lat))
+              (check (and (= 200 mn) (= 300 mx))
+                     "with the interval range the peripheral asked for")
+              (check (= 6000 to) "and its supervision timeout")))))
+
+        (check (equalp #(9 9) (ble:att-read-value chan (ble:gatt-char-handle ffe1)))
+               "and the link still serves reads after the renegotiation")
 
         ;; --- conditions, against a live refusal ---------------------------
         (let ((r (ble:att-write-value chan #x00FF #(1))))

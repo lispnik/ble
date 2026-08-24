@@ -167,8 +167,11 @@ and learn the LE ACL buffer size. Returns the LE ACL data packet length."
 NUS holds one of these for the HCI transport; RXBUF accumulates ACL
 fragments during L2CAP reassembly, and PENDING holds ATT PDUs that were
 reassembled but not yet asked for -- a single read can complete more than
-one, and the surplus has to survive until the next call."
-  sock handle acl-len (rxbuf (make-octets 0)) (pending '()))
+one, and the surplus has to survive until the next call. SIG-PENDING is the
+same for the L2CAP signalling channel, whose frames used to be dropped on the
+floor along with every other non-ATT CID."
+  sock handle acl-len (rxbuf (make-octets 0)) (pending '()) (sig-pending '())
+  (sig-results '()))
 
 (defun %await-le-connection (sock opcode timeout-ms)
   "Wait up to TIMEOUT-MS (a wall-clock deadline) for the (Enhanced)
@@ -302,16 +305,17 @@ attempt between tries."
 
 ;;; --- ACL / L2CAP transport (ATT lives on CID 0x0004) -------------------
 
-(defun hci-acl-send-att (conn pdu)
-  "Wrap an ATT PDU in an L2CAP B-frame on the ATT CID and send it as one or
-more HCI ACL data packets to the connection."
+(defun hci-acl-send-l2cap (conn cid pdu)
+  "Wrap PDU in an L2CAP B-frame on CID and send it as one or more HCI ACL data
+packets. ATT is one channel among several -- the signalling channel carries
+connection parameter requests on CID 0x0005 -- so the framing is shared."
   (let* ((pdu (coerce-octets pdu))
          (l2cap (make-octets (+ 4 (length pdu))))
          (handle (hci-conn-handle conn))
          (maxseg (max 1 (hci-conn-acl-len conn)))
          (total (+ 4 (length pdu))))
     (u16le-put l2cap 0 (length pdu))   ; L2CAP length
-    (u16le-put l2cap 2 +att-cid+)      ; channel id
+    (u16le-put l2cap 2 cid)            ; channel id
     (replace l2cap pdu :start1 4)
     (loop with off = 0
           for first = t then nil
@@ -328,6 +332,30 @@ more HCI ACL data packets to the connection."
           do (hci-write-raw (hci-conn-sock conn) acl)
              (setf off end)
           while (< off total))))
+
+(defun hci-acl-send-att (conn pdu)
+  "Send an ATT PDU on the ATT CID."
+  (hci-acl-send-l2cap conn +att-cid+ pdu))
+
+(defvar *l2cap-signalling-handler* nil
+  "Called with the connection after frames are reassembled, to answer anything
+that arrived on the signalling channel. Set by src/l2cap-signalling.lisp.
+
+A hook rather than a direct call because this file loads first, and a variable
+also lets a caller wrap it to observe what was handled, or bind it to NIL to
+take over the channel entirely. Answering is the sane default: a peer that
+asked for something is waiting, and silence costs it a timeout.")
+
+(defvar *in-l2cap-serve* nil
+  "Guards against re-entry. Answering a parameter request performs an LE
+Connection Update, which waits for an event, which reassembles more frames --
+without this, a second request arriving in that window would recurse.")
+
+(defun %maybe-serve-signalling (conn)
+  (when (and *l2cap-signalling-handler* (not *in-l2cap-serve*)
+             (hci-conn-sig-pending conn))
+    (let ((*in-l2cap-serve* t))
+      (funcall *l2cap-signalling-handler* conn))))
 
 (defun %drain-l2cap-frames (conn)
   "Pull every complete L2CAP frame out of CONN's reassembly buffer, queueing
@@ -347,9 +375,16 @@ when losing it costs the most."
         (let ((cid (u16-le buf 2))
               (frame (subseq buf 4 (+ 4 l2len))))
           (setf (hci-conn-rxbuf conn) (subseq buf (+ 4 l2len)))
-          (when (= cid +att-cid+)
-            (setf (hci-conn-pending conn)
-                  (nconc (hci-conn-pending conn) (list frame)))))))))
+          (cond
+            ((= cid +att-cid+)
+             (setf (hci-conn-pending conn)
+                   (nconc (hci-conn-pending conn) (list frame))))
+            ;; The peer's own parameter request arrives here. Dropping it, as
+            ;; every non-ATT CID used to be dropped, leaves a peripheral
+            ;; waiting for an answer that will never come.
+            ((= cid +l2cap-sig-cid+)
+             (setf (hci-conn-sig-pending conn)
+                   (nconc (hci-conn-sig-pending conn) (list frame))))))))))
 
 (defun hci-acl-recv-att (conn timeout-ms)
   "Read until a complete ATT PDU arrives on the ATT CID; reassembles ACL
@@ -381,6 +416,7 @@ fragments. Returns the ATT PDU octets, NIL on timeout, or :DISCONNECTED."
                                     (hci-conn-rxbuf conn) data)
                        (coerce-octets data)))
              (%drain-l2cap-frames conn)
+             (%maybe-serve-signalling conn)
              (when (hci-conn-pending conn)
                (return (pop (hci-conn-pending conn)))))))))))
 
