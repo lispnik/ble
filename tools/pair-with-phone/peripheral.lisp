@@ -213,7 +213,9 @@ whichever lost never saw the packet."
                         (declare (ignore conn))
                         (format t "~&phone disconnected; advertising again~%")
                         (force-output))
-       :on-tick (lambda (conn) (on-tick state server conn))))))
+       :on-tick (lambda (conn request)
+                  (declare (ignore request))
+                  (on-tick state server conn))))))
 
 (run)
 (sb-ext:exit)

@@ -34,8 +34,12 @@
                     nil)
                    ((and (consp form) (eq (car form) 'handler-bind)) nil)
                    ;; definitions: evaluate, so later forms resolve them
+                   ;; Definitions are evaluated so later forms see them --
+                   ;; including DEFPACKAGE, without which the IN-PACKAGE that
+                   ;; follows it names a package that does not exist yet.
                    ((and (consp form)
-                         (member (car form) '(defparameter defvar defconstant defun)))
+                         (member (car form) '(defpackage defparameter defvar
+                                              defconstant defun defstruct)))
                     (ignore-errors (eval form)))
                    ;; anything else drives hardware: compile only
                    (t (ignore-errors (compile nil `(lambda () ,form))))))))))
@@ -44,9 +48,13 @@
 (check-file "tools/live-two-radios/peripheral.lisp")
 
 ;; build-server is pure, so check what it actually produces.
-(let ((f (find-symbol "BUILD-SERVER" :ble)))
+(let ((f (find-symbol "BUILD-SERVER" :two-radios-peripheral)))
   (if (and f (fboundp f))
-      (multiple-value-bind (server ffe1 cccd1 ffe2 cccd2) (funcall f)
+      (let* ((s (funcall f))
+             (get (lambda (slot) (slot-value s (find-symbol slot :two-radios-peripheral))))
+             (server (funcall get "SERVER"))
+             (ffe1 (funcall get "FFE1")) (cccd1 (funcall get "CCCD1"))
+             (ffe2 (funcall get "FFE2")) (cccd2 (funcall get "CCCD2")))
         (format t "~&  built: ~D attributes, ~D services~%"
                 (ble:gatt-attribute-count server)
                 (length (ble:gatt-server-services server)))

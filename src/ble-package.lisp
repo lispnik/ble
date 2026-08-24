@@ -173,6 +173,7 @@
           hci-le-create-connection
           hci-conn
           hci-conn-handle
+          hci-conn-sock
           hci-conn-close
           hci-pump
           hci-take-event

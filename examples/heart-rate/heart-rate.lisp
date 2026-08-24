@@ -147,7 +147,8 @@ reboots and the built-in radio on a Pi cannot do everything a dongle can."
                           (format t "~&disconnected; advertising again~%")
                           (force-output))
          :on-tick
-         (lambda (conn)
+         (lambda (conn request)
+           (declare (ignore request))
            (let ((now (get-internal-real-time)))
              (when (> now next)
                (setf next (+ now (round (* interval-ms

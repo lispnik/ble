@@ -57,7 +57,10 @@ when it leaves. Runs until SECONDS elapses, or forever when SECONDS is NIL.
 The hooks are where a peripheral does its own work:
 
   ON-CONNECT     (conn peer-addr peer-addr-type) once per connection
-  ON-TICK        (conn) between polls -- where a sensor notifies
+  ON-TICK        (conn request) between polls -- where a sensor notifies.
+                 REQUEST is the ATT opcode just answered, or NIL if nothing
+                 arrived, so a peripheral can see what it is being asked for
+                 without reading the socket itself.
   ON-DISCONNECT  (conn) after the peer leaves, before advertising resumes
 
 Reads only through the connection once one exists. Polling the socket
@@ -96,5 +99,5 @@ loses simply never sees them."
                           (progn
                             (when on-disconnect (funcall on-disconnect conn))
                             (setf conn nil))
-                          (when on-tick (funcall on-tick conn)))))))))
+                          (when on-tick (funcall on-tick conn op)))))))))
       (ignore-errors (set-adv-enable sock nil)))))

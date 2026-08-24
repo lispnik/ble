@@ -1,77 +1,78 @@
 ;;;; Pairing, responder side.
+;;;;
+;;;; In its own package on the public API. This has no GATT database worth the
+;;;; name -- the point is the Security Manager exchange, not what is served
+;;;; over it -- but it still uses PERIPHERAL-ACCEPT rather than hand-rolling
+;;;; the wait for a connection, because that is where the Enhanced Connection
+;;;; Complete subevent was missed once already.
 (require :asdf)
 (asdf:initialize-source-registry
  (list :source-registry (list :tree (truename "../../"))
        :ignore-inherited-configuration))
 (handler-bind ((warning #'muffle-warning)) (asdf:load-system :ble))
-(in-package #:ble)
+
+(defpackage #:smp-responder (:use #:common-lisp) (:export #:run))
+(in-package #:smp-responder)
 
 (defun env-int (name d)
   (let ((v (sb-ext:posix-getenv name)))
     (if (and v (plusp (length v))) (parse-integer v :junk-allowed t) d)))
-(defparameter +dev+ (env-int "PERIPH_DEV" 1))
 
-(with-hci-user-socket (sock +dev+)
-  (let ((local-addr (hci-read-bd-addr :sock sock)))
-    (format t "~&[p] hci~D, address ~A~%" +dev+ (format-mac local-addr))
-    (set-adv-parameters sock :adv-type +adv-ind+ :own-addr-type 0)
-    (set-adv-data sock (concatenate '(vector (unsigned-byte 8))
-                                    (vector 2 1 6 5 9)
-                                    (map 'vector #'char-code "PAIR")))
-    (with-advertising (sock)
-      (format t "~&[p] advertising~%") (force-output)
-      (let ((handle nil) (peer nil))
-        (loop repeat 180
-              for pkt = (hci-poll-read sock 500)
-              do (when (and pkt (>= (length pkt) 15) (= (aref pkt 0) #x04)
-                            (= (aref pkt 1) #x3E)
-                            ;; Enhanced Connection Complete as well as the
-                            ;; plain one: which a controller sends depends on
-                            ;; the event mask, and the peer address sits at
-                            ;; the same offset in both.
-                            (member (aref pkt 3) '(#x01 #x0A))
-                            (zerop (aref pkt 4)))
-                   (setf handle (u16-le pkt 5)
-                         peer (subseq pkt 9 15))
-                   (return)))
-        (if (null handle)
-            (format t "~&[p] nobody connected~%")
-            (let ((conn (make-hci-conn :sock sock :handle handle
-                                       :acl-len (hci-socket-acl-len sock))))
-              (format t "~&[p] connected to ~A~%" (format-mac peer))
-              (force-output)
-              (handler-case
-                  (let ((session (smp-pair conn :role :peripheral
-                                                :local-addr local-addr
-                                                :local-addr-type :public
-                                                :peer-addr peer
-                                                :peer-addr-type :public
-                                           :io-capability :display-only
-                                           :passkey (parse-integer
-                                                     (or (sb-ext:posix-getenv "PASSKEY")
-                                                         "123456")))))
-                    (format t "~&[p] PAIRED, LTK ~{~2,'0X~}~%"
-                            (coerce (smp-session-ltk session) 'list))
-                    (force-output)
-                    ;; Answer the key request the central's encryption triggers.
-                    (loop repeat 60
-                          for pkt = (hci-poll-read sock 500)
-                          do (when (and pkt (>= (length pkt) 4)
-                                        (= (aref pkt 0) #x04))
-                               (cond
-                                 ((and (= (aref pkt 1) #x3E) (= (aref pkt 3) #x05))
-                                  (format t "~&[p] LTK requested~%") (force-output)
-                                  (smp-answer-ltk-request conn pkt :session session))
-                                 ((= (aref pkt 1) #x08)
-                                  (format t "~&[p] ENCRYPTED: status ~D enabled ~D~%"
-                                          (aref pkt 3) (aref pkt 6))
-                                  (force-output)
-                                  (return))))))
-                (smp-error (e)
-                  (format t "~&[p] ~A~%" e) (force-output)
-                  ;; Keep the link a moment so the Pairing Failed we just sent
-                  ;; actually leaves the controller. Tearing down immediately
-                  ;; discards it, and the peer then reports a timeout instead
-                  ;; of the reason we gave it.
-                  (dotimes (i 20) (ble:hci-pump conn 100))))))))))
+(defun run (&key (dev (env-int "PERIPH_DEV" 1))
+                 (passkey (env-int "PASSKEY" 123456)))
+  (ble:install-adapter-teardown)
+  (ble:with-hci-user-socket (sock dev)
+    (let ((local-addr (ble:hci-read-bd-addr :sock sock)))
+      (format t "~&[p] hci~D, address ~A~%" dev (ble:format-mac local-addr))
+      (ble:set-adv-parameters sock :adv-type ble:+adv-ind+ :own-addr-type 0)
+      (ble:set-adv-data sock (ble:adv-data
+                              :flags '(:general-discoverable :no-bredr)
+                              :name "PAIR"))
+      (ble:with-advertising (sock)
+        (format t "~&[p] advertising~%") (force-output)
+        (multiple-value-bind (conn peer ptype)
+            (ble:peripheral-accept sock :timeout-ms 90000)
+          (if (null conn)
+              (format t "~&[p] nobody connected~%")
+              (progn
+                (format t "~&[p] connected to ~A~%" (ble:format-mac peer))
+                (force-output)
+                (handler-case
+                    (let ((session (ble:smp-pair conn :role :peripheral
+                                                      :local-addr local-addr
+                                                      :local-addr-type :public
+                                                      :peer-addr peer
+                                                      :peer-addr-type ptype
+                                                      :io-capability :display-only
+                                                      :passkey passkey)))
+                      (format t "~&[p] PAIRED, LTK ~{~2,'0X~}~%"
+                              (coerce (ble:smp-session-ltk session) 'list))
+                      (force-output)
+                      ;; Answer the key request the central's encryption
+                      ;; triggers, then report what the controller made of it.
+                      (loop repeat 60
+                            for pkt = (progn (ble:hci-pump conn 500)
+                                             (or (ble:hci-take-event
+                                                  conn :event #x3E :subevent #x05)
+                                                 (ble:hci-take-event conn :event #x08)))
+                            do (when pkt
+                                 (cond
+                                   ((= (aref pkt 1) #x3E)
+                                    (format t "~&[p] LTK requested~%") (force-output)
+                                    (ble:smp-answer-ltk-request conn pkt
+                                                                :session session))
+                                   (t
+                                    (format t "~&[p] ENCRYPTED: status ~D enabled ~D~%"
+                                            (aref pkt 3) (aref pkt 6))
+                                    (force-output)
+                                    (return))))))
+                  (ble:smp-error (e)
+                    (format t "~&[p] ~A~%" e) (force-output)
+                    ;; Hold the link a moment so the Pairing Failed we just
+                    ;; sent actually leaves the controller. Tearing down now
+                    ;; discards it, and the peer reports a timeout instead of
+                    ;; the reason we gave it.
+                    (dotimes (i 20) (ble:hci-pump conn 100)))))))))))
+
+(run)
 (sb-ext:exit)
