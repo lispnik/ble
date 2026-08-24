@@ -30,15 +30,15 @@
                                       :dev dev :init-phys #x01 :timeout 25))
     (format t "~&connected to ~A~%" mac) (force-output)
     (ble:att-exchange-mtu chan 247)
-    (let ((hrs (ble:att-find-service chan (ble:uuid16 #x180D))))
+    (let ((hrs (ble:att-find-service chan (ble:uuid16 ble:+service-heart-rate+))))
       (unless hrs (error "no heart rate service on this device"))
       (format t "~&heart rate service at ~D-~D~%"
               (ble:gatt-service-start hrs) (ble:gatt-service-end hrs))
       (let* ((chars (ble:att-discover-characteristics
                      chan :start (ble:gatt-service-start hrs)
                           :end (ble:gatt-service-end hrs)))
-             (m (ble:find-char-by-uuid chars (ble:uuid16 #x2A37)))
-             (loc (ble:find-char-by-uuid chars (ble:uuid16 #x2A38))))
+             (m (ble:find-char-by-uuid chars (ble:uuid16 ble:+char-heart-rate-measurement+)))
+             (loc (ble:find-char-by-uuid chars (ble:uuid16 ble:+char-body-sensor-location+))))
         (unless m (error "no measurement characteristic"))
         (when loc
           (format t "~&body sensor location: ~A~%"

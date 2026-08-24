@@ -183,3 +183,48 @@ simply becomes one nobody can see."
 
 (test an-unknown-flag-is-an-error-rather-than-a-silent-zero
   (signals error (ble:adv-data :flags '(:general-discoverable :nonsense))))
+
+;;; --- assigned numbers ---------------------------------------------------
+
+(test appearance-encodes-little-endian
+  "0x0341 written out by hand is #(#x41 #x03), and the reversed form is a
+different valid appearance that simply draws the wrong icon. The helper exists
+so that mistake is not available."
+  (is (equalp #(#x41 #x03) (ble:appearance ble:+appearance-heart-rate-belt+)))
+  (is (equalp #(#x00 #x00) (ble:appearance ble:+appearance-unknown+)))
+  (is (= 2 (length (ble:appearance ble:+appearance-generic-sensor+)))))
+
+(test the-heart-rate-appearance-is-in-the-heart-rate-category
+  "Category is the top 10 bits, subtype the low 6 -- the belt is a subtype of
+the sensor rather than an unrelated number."
+  (is (= (ash ble:+appearance-heart-rate-sensor+ -6)
+         (ash ble:+appearance-heart-rate-belt+ -6))
+      "same category")
+  (is (= 1 (ldb (byte 6 0) ble:+appearance-heart-rate-belt+)) "subtype 1"))
+
+(test service-changed-carries-two-handles
+  (let ((v (ble:service-changed-range)))
+    (is (= 4 (length v)))
+    (is (= 1 (ble:u16-le v 0)) "from the first handle")
+    (is (= #xFFFF (ble:u16-le v 2)) "to the last: assume everything moved"))
+  (let ((v (ble:service-changed-range #x0010 #x0020)))
+    (is (= #x0010 (ble:u16-le v 0)))
+    (is (= #x0020 (ble:u16-le v 2)))))
+
+(test the-assigned-numbers-are-the-published-ones
+  "Transcription is the only way these can be wrong, so check the ones the
+examples depend on against the values the SIG publishes."
+  (is (= #x1800 ble:+service-generic-access+))
+  (is (= #x1801 ble:+service-generic-attribute+))
+  (is (= #x180A ble:+service-device-information+))
+  (is (= #x180D ble:+service-heart-rate+))
+  (is (= #x2A00 ble:+char-device-name+))
+  (is (= #x2A01 ble:+char-appearance+))
+  (is (= #x2A05 ble:+char-service-changed+))
+  (is (= #x2A37 ble:+char-heart-rate-measurement+))
+  (is (= #x2A38 ble:+char-body-sensor-location+))
+  (is (= #x2A39 ble:+char-heart-rate-control-point+))
+  ;; The CCCD's number lives with the GATT code as +gatt-cccd+; it is not
+  ;; repeated here, because two names for one number is the drift these
+  ;; constants exist to prevent.
+  )

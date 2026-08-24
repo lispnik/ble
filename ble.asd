@@ -25,6 +25,7 @@
                              (:file "conditions" :depends-on ("package"))
                              (:file "octets"     :depends-on ("package"))
                              (:file "ad"         :depends-on ("octets"))
+                             (:file "uuids"      :depends-on ("octets"))
                              (:file "mac"        :depends-on ("conditions"))))))
 
 (asdf:defsystem #:ble
@@ -42,9 +43,9 @@
                              (:file "att-conditions" :depends-on ("ble-package"))
                              (:file "hci"        :depends-on ("ffi"))
                              (:file "advertiser" :depends-on ("hci"))
-                             (:file "nus"        :depends-on ("hci" "att-conditions"))
-                             (:file "gatt-server" :depends-on ("nus"))
-                             (:file "hci-conn"   :depends-on ("nus"))
+                             (:file "att"        :depends-on ("hci" "att-conditions"))
+                             (:file "gatt-server" :depends-on ("att"))
+                             (:file "hci-conn"   :depends-on ("att"))
                              (:file "conn-params" :depends-on ("hci-conn"))
                              (:file "l2cap-signalling" :depends-on ("conn-params"))
                              (:file "l2cap-coc" :depends-on ("l2cap-signalling"))
@@ -54,6 +55,7 @@
                              (:file "peripheral" :depends-on ("gatt-server"
                                                               "hci-conn"
                                                               "advertiser"))
+                             (:file "nus"        :depends-on ("att" "hci-conn"))
                              (:file "teardown"   :depends-on ("hci-conn"))
                              ;; last: wraps acquire/release pairs from all of
                              ;; the above

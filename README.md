@@ -452,7 +452,7 @@ ATT PDU as a notification and lost an in-flight response; the signalling
 server consumed a response another caller was blocked on. Each surfaced as an
 unrelated timeout elsewhere, and four of the five were invisible to the suite.
 
-**Two transports, one ATT layer.** `att-send` and `att-recv` dispatch on
+**Two transports, one ATT layer** (`src/att.lisp`). `att-send` and `att-recv` dispatch on
 whether the channel is an integer fd (a kernel L2CAP socket) or an `hci-conn`,
 so every line of ATT protocol is shared:
 

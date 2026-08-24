@@ -12,6 +12,12 @@
 
 (defparameter *name* "Lisp HRM")
 
+;;; Values the Heart Rate profile defines and the SIG does not name centrally,
+;;; so they live here rather than in ble's assigned-numbers file.
+(defconstant +location-chest+ #x01)
+(defconstant +control-point-reset-energy+ #x01)
+(defconstant +control-point-not-supported+ #x80)
+
 ;;; --- the measurement ----------------------------------------------------
 ;;;
 ;;; Heart Rate Measurement (0x2A37) is a flags octet followed by whatever the
@@ -60,31 +66,37 @@ Appearance the moment it connects, and without Generic Attribute a client has
 no way to learn the database changed."
   (let ((server (ble:make-gatt-server :mtu 23))
         (sensor nil))
-    (ble:gatt-add-service server #x1800)
-    (ble:gatt-add-characteristic server :uuid #x2A00 :properties '(:read)
-                                        :value *name*)
-    (ble:gatt-add-characteristic server :uuid #x2A01 :properties '(:read)
-                                        :value #(#x41 #x03))  ; 0x0341, HR belt
-    (ble:gatt-add-service server #x1801)
-    (ble:gatt-add-characteristic server :uuid #x2A05 :properties '(:indicate)
-                                        :value #(1 0 255 255))
-    (ble:gatt-add-service server #x180D)
+    (ble:gatt-add-service server ble:+service-generic-access+)
+    (ble:gatt-add-characteristic server :uuid ble:+char-device-name+
+                                        :properties '(:read) :value *name*)
+    (ble:gatt-add-characteristic server :uuid ble:+char-appearance+
+                                        :properties '(:read)
+                                        :value (ble:appearance
+                                                ble:+appearance-heart-rate-belt+))
+    (ble:gatt-add-service server ble:+service-generic-attribute+)
+    (ble:gatt-add-characteristic server :uuid ble:+char-service-changed+
+                                        :properties '(:indicate)
+                                        :value (ble:service-changed-range))
+    (ble:gatt-add-service server ble:+service-heart-rate+)
     ;; Notify only. The profile forbids reading the measurement: a value read
     ;; at an arbitrary moment says nothing useful about a heart rate.
     (let ((measurement (ble:gatt-add-characteristic
-                        server :uuid #x2A37 :properties '(:notify))))
-      (ble:gatt-add-characteristic server :uuid #x2A38 :properties '(:read)
-                                          :value #(#x01))   ; body location: chest
+                        server :uuid ble:+char-heart-rate-measurement+
+                               :properties '(:notify))))
+      (ble:gatt-add-characteristic server :uuid ble:+char-body-sensor-location+
+                                          :properties '(:read)
+                                          :value (vector +location-chest+))
       (setf sensor (make-sensor :server server :measurement-handle measurement))
       ;; Control point: the only defined opcode resets energy expended, and
       ;; anything else must be refused with 0x80 rather than ignored.
       (ble:gatt-add-characteristic
-       server :uuid #x2A39 :properties '(:write)
+       server :uuid ble:+char-heart-rate-control-point+ :properties '(:write)
               :on-write (lambda (s a v)
                           (declare (ignore s a))
-                          (if (and (plusp (length v)) (= 1 (aref v 0)))
+                          (if (and (plusp (length v))
+                                   (= +control-point-reset-energy+ (aref v 0)))
                               (progn (setf (sensor-energy-expended sensor) 0) nil)
-                              #x80)))   ; control point not supported
+                              +control-point-not-supported+)))
       sensor)))
 
 ;;; --- running it ---------------------------------------------------------
@@ -118,7 +130,7 @@ reboots and the built-in radio on a Pi cannot do everything a dongle can."
         (ble:set-adv-data sock (ble:adv-data
                                 :flags '(:general-discoverable :no-bredr)
                                 :name *name*
-                                :services-16 '(#x180D)))
+                                :services-16 (list ble:+service-heart-rate+)))
         (format t "~&~A advertising on hci~D as ~A~%" *name* dev
                 (ble:format-mac addr))
         (force-output)

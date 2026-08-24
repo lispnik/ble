@@ -126,6 +126,8 @@
           gatt-service-end
           gatt-service-uuid
           gatt-service-uuid-string
+          +gatt-cccd+
+          +gatt-characteristic-decl+
           +gatt-primary-service+
           +gatt-secondary-service+
           att-find-cccd

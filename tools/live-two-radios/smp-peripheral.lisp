@@ -61,7 +61,7 @@
                                (cond
                                  ((and (= (aref pkt 1) #x3E) (= (aref pkt 3) #x05))
                                   (format t "~&[p] LTK requested~%") (force-output)
-                                  (smp-answer-ltk-request session pkt))
+                                  (smp-answer-ltk-request conn pkt :session session))
                                  ((= (aref pkt 1) #x08)
                                   (format t "~&[p] ENCRYPTED: status ~D enabled ~D~%"
                                           (aref pkt 3) (aref pkt 6))

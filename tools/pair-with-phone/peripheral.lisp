@@ -35,25 +35,28 @@ A phone that finds no services often disconnects before anyone gets round to
 pairing, and Generic Access must be first: handles are allocated in order and
 iOS reads Device Name and Appearance the moment it connects."
   (let ((server (ble:make-gatt-server :mtu 23)))
-    (ble:gatt-add-service server #x1800)
-    (ble:gatt-add-characteristic server :uuid #x2A00 :properties '(:read)
-                                        :value *name*)
-    (ble:gatt-add-characteristic server :uuid #x2A01 :properties '(:read)
-                                        :value #(#xC0 #x03))
+    (ble:gatt-add-service server ble:+service-generic-access+)
+    (ble:gatt-add-characteristic server :uuid ble:+char-device-name+
+                                        :properties '(:read) :value *name*)
+    (ble:gatt-add-characteristic server :uuid ble:+char-appearance+
+                                        :properties '(:read)
+                                        :value (ble:appearance
+                                                ble:+appearance-generic-tag+))
     ;; Generic Attribute. Its CCCD is protected deliberately: iOS writes it on
     ;; every connection, unprompted, to subscribe to Service Changed -- so
     ;; requiring encryption on it makes the phone pair of its own accord, with
     ;; nobody tapping anything. A peripheral cannot start pairing; all it can
     ;; do is require security on something the central already wants.
-    (ble:gatt-add-service server #x1801)
-    (ble:gatt-add-characteristic server :uuid #x2A05 :properties '(:indicate)
-                                        :value #(1 0 255 255)
+    (ble:gatt-add-service server ble:+service-generic-attribute+)
+    (ble:gatt-add-characteristic server :uuid ble:+char-service-changed+
+                                        :properties '(:indicate)
+                                        :value (ble:service-changed-range)
                                         :security :encrypted)
-    (ble:gatt-add-service server #x180A)
-    (ble:gatt-add-characteristic server :uuid #x2A29 :properties '(:read)
-                                        :value "lispnik")
-    (ble:gatt-add-characteristic server :uuid #x2A24 :properties '(:read)
-                                        :value "ble")
+    (ble:gatt-add-service server ble:+service-device-information+)
+    (ble:gatt-add-characteristic server :uuid ble:+char-manufacturer-name+
+                                        :properties '(:read) :value "lispnik")
+    (ble:gatt-add-characteristic server :uuid ble:+char-model-number+
+                                        :properties '(:read) :value "ble")
     (ble:gatt-add-service server #xFFE0)
     (ble:gatt-add-characteristic server :uuid #xFFE1
                                  :properties '(:read :write :notify)

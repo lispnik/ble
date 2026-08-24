@@ -54,6 +54,32 @@
    #:adv-local-name
    #:adv-service-uuids-16
    #:adv-data
+   ;; Assigned numbers (src/uuids.lisp)
+   #:+service-generic-access+
+   #:+service-generic-attribute+
+   #:+service-device-information+
+   #:+service-battery+
+   #:+service-heart-rate+
+   #:+char-device-name+
+   #:+char-appearance+
+   #:+char-service-changed+
+   #:+char-manufacturer-name+
+   #:+char-model-number+
+   #:+char-serial-number+
+   #:+char-firmware-revision+
+   #:+char-battery-level+
+   #:+char-heart-rate-measurement+
+   #:+char-body-sensor-location+
+   #:+char-heart-rate-control-point+
+   #:+appearance-unknown+
+   #:+appearance-generic-phone+
+   #:+appearance-generic-tag+
+   #:+appearance-generic-thermometer+
+   #:+appearance-heart-rate-sensor+
+   #:+appearance-heart-rate-belt+
+   #:+appearance-generic-sensor+
+   #:appearance
+   #:service-changed-range
    #:+ad-flags+
    ;; MAC addresses (src/mac.lisp). Held on-air, LSB first, everywhere;
    ;; these two are the only place the display order exists.
