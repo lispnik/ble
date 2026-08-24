@@ -1460,3 +1460,65 @@ pairing solely because a read came back with this."
       (is (equalp #(1 2 3) (ble:att-read-value chan value-handle))
           "a characteristic with no security requirement still reads on a
 clear link"))))
+
+;;; --- association model selection ----------------------------------------
+;;;
+;;; Neither end chooses the model; it falls out of both sets of capabilities,
+;;; and both must reach the same answer or one will run twenty rounds while
+;;; the other runs one.
+
+(defun model (i r &key (auth #x0D))
+  (ble:smp-association-model (ble:io-capability-code i)
+                             (ble:io-capability-code r)
+                             auth auth))
+
+(test without-mitm-everything-is-just-works
+  "Capability is irrelevant if neither side asked for protection -- two
+keyboards still pair with Just Works if nobody requested MITM."
+  (is (eq :just-works (model :keyboard-display :keyboard-display :auth #x09))
+      "SC and bonding, but no MITM bit"))
+
+(test a-device-with-no-io-forces-just-works
+  "There is no model that involves a person on a device with no way to reach
+one, so asking for MITM cannot conjure one."
+  (is (eq :just-works (model :no-input-no-output :keyboard-display)))
+  (is (eq :just-works (model :keyboard-display :no-input-no-output)))
+  (is (eq :just-works (model :no-input-no-output :no-input-no-output))))
+
+(test two-displays-that-can-answer-use-numeric-comparison
+  (is (eq :numeric-comparison (model :display-yes-no :display-yes-no)))
+  (is (eq :numeric-comparison (model :keyboard-display :display-yes-no)))
+  (is (eq :numeric-comparison (model :keyboard-display :keyboard-display))))
+
+(test a-display-facing-a-keyboard-uses-passkey-entry
+  (is (eq :passkey-entry (model :display-only :keyboard-only)))
+  (is (eq :passkey-entry (model :keyboard-only :display-only))
+      "and the same either way round")
+  (is (eq :passkey-entry (model :display-yes-no :keyboard-only)))
+  (is (eq :passkey-entry (model :keyboard-only :keyboard-display))))
+
+(test two-displays-with-no-keyboard-cannot-do-better-than-just-works
+  (is (eq :just-works (model :display-only :display-only))
+      "neither can enter anything, so there is nothing to compare against"))
+
+;;; --- passkey encoding ---------------------------------------------------
+
+(test a-passkey-becomes-a-128-bit-value-for-f6
+  (is (= 16 (length (ble:passkey-octets 0))))
+  (is (equalp (ble:make-octets 16) (ble:passkey-octets 0)))
+  (let ((v (ble:passkey-octets 999999)))
+    (is (= #x0F (aref v 13)) "big-endian: 999999 is 0x0F423F")
+    (is (= #x42 (aref v 14)))
+    (is (= #x3F (aref v 15)))
+    (is (every #'zerop (subseq v 0 13)) "and the rest is padding")))
+
+(test the-passkey-is-consumed-one-bit-per-round
+  "Twenty rounds, low bit first, each mixed into that round's confirm as
+0x80 with the bit in its low position."
+  (is (= #x80 (ble:passkey-bit #b0 0)))
+  (is (= #x81 (ble:passkey-bit #b1 0)))
+  (is (= #x80 (ble:passkey-bit #b1 1)) "bit 1 of 1 is clear")
+  (is (= #x81 (ble:passkey-bit #b10 1)) "bit 1 of 2 is set")
+  ;; 20 bits is enough for six digits, which is why it is twenty rounds
+  (is (< 999999 (expt 2 20)))
+  (is (= #x80 (ble:passkey-bit 0 19))))

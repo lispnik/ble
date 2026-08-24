@@ -154,18 +154,32 @@ session whose LTK is ready to use; `smp-start-encryption` (central) and
 `smp-answer-ltk-request` (peripheral) turn that key into an encrypted link.
 Both roles are implemented.
 
-**Scope, because the omissions matter.** Secure Connections only — legacy
-(4.0/4.1) pairing is not here, and its Just Works variant offers no protection
-against a passive eavesdropper at all. Just Works association only: the
-exchange for numeric comparison is identical, and what is missing is a way to
-show a user six digits and ask, which is a UI question this library should not
-answer (`smp-g2` is implemented, so that path is short). No key distribution —
-Secure Connections derives the LTK on both sides, so nothing needs sending for
-encryption, but IRK and CSRK are not exchanged.
+**All three association models.** Which one runs is not chosen — it falls out
+of both ends' IO capabilities and whether either asked for MITM protection
+(`smp-association-model` computes it, and both ends must reach the same answer
+or one would run twenty rounds while the other ran one):
 
-**Just Works gives no MITM protection.** An attacker present during pairing
-can be both ends of it. It defends against passive eavesdropping and nothing
-more. That is a limit, not a footnote.
+- **Just Works** — no MITM protection at all. An attacker present during
+  pairing can be both ends of it; it defends against passive eavesdropping and
+  nothing more. That is a limit, not a footnote.
+- **Passkey entry** — pass `:io-capability :display-only` (or
+  `:keyboard-only`) and a `:passkey`, or a `:passkey-fn` to be asked for one.
+  Twenty exchanges, one per bit, each committing both ends to a fresh nonce
+  before either reveals it. That is what resists a man in the middle: an
+  attacker who guesses wrong on any bit is caught on that round and cannot go
+  back. It is also why it costs twenty round trips — the passkey leaks one bit
+  at a time instead of all at once.
+- **Numeric comparison** — `:io-capability :display-yes-no` and a
+  `:confirm-fn` that is shown six digits and returns whether they matched. A
+  caller with no way to ask must not silently accept, so a missing
+  `confirm-fn` refuses.
+
+**Scope.** Secure Connections only — legacy (4.0/4.1) pairing is not here, and
+its Just Works variant offers no protection against a passive eavesdropper at
+all. No key distribution: Secure Connections derives the LTK on both sides so
+nothing needs sending for encryption, but IRK and CSRK are not exchanged,
+which is why a bonded peer using a resolvable private address cannot yet be
+recognised across rotations.
 
 **The ECDH is in software, and not by preference.** These RTL8761B controllers
 answer `LE Read Local P-256 Public Key` with the *same* key across separate
@@ -180,7 +194,9 @@ having both in one place is worth more than saving the round trips.
 `smp-dhkey` is checked for the property that makes ECDH work — both sides
 reaching the same secret. Over two radios, an initiator and a responder in
 separate processes derive a byte-identical LTK and the controllers report the
-link encrypted. But **both ends are this code**, so agreement demonstrates
+link encrypted — with a *different* LTK each run, and with passkey entry a
+deliberately mismatched passkey is rejected rather than quietly falling back
+to Just Works. But **both ends are this code**, so agreement demonstrates
 internal consistency rather than conformance: a systematically wrong `f5`
 would agree with itself. Interop against an independent stack is the proof
 that is missing. It was attempted against BlueZ three ways and none completed

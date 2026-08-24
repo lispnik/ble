@@ -257,6 +257,11 @@
           *coc-default-credits*
           ;; Security Manager (src/smp.lisp, src/smp-crypto.lisp)
           smp-pair
+          smp-association-model
+          io-capability-code
+          passkey-octets
+          passkey-bit
+          +smp-io-capabilities+
           smp-request-security
           smp-peer-addr-type
           smp-session

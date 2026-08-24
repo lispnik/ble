@@ -35,9 +35,77 @@
 (defconstant +smp-pairing-dhkey-check+ #x0D)
 (defconstant +smp-security-request+    #x0B)
 
+(defconstant +smp-io-display-only+       #x00)
+(defconstant +smp-io-display-yes-no+     #x01)
+(defconstant +smp-io-keyboard-only+      #x02)
 (defconstant +smp-io-no-input-no-output+ #x03)
+(defconstant +smp-io-keyboard-display+   #x04)
+
+(defparameter +smp-io-capabilities+
+  `((:display-only      . ,+smp-io-display-only+)
+    (:display-yes-no    . ,+smp-io-display-yes-no+)
+    (:keyboard-only     . ,+smp-io-keyboard-only+)
+    (:no-input-no-output . ,+smp-io-no-input-no-output+)
+    (:keyboard-display  . ,+smp-io-keyboard-display+)))
+
 (defconstant +smp-auth-bonding+ #x01)
+(defconstant +smp-auth-mitm+    #x04)
 (defconstant +smp-auth-sc+      #x08)
+
+(defun io-capability-code (io)
+  (if (integerp io)
+      io
+      (or (cdr (assoc io +smp-io-capabilities+))
+          (error "unknown IO capability ~S" io))))
+
+;;; The association model is not chosen; it falls out of what both ends can
+;;; do. Core spec Vol 3, Part H, Table 2.8. Two rules carry most of it: if
+;;; either side cannot both show and accept a number the result is Just Works,
+;;; and if neither side asked for MITM protection it is Just Works regardless
+;;; of what they could have managed.
+
+(defun smp-association-model (initiator-io responder-io initiator-auth responder-auth)
+  "Which model this pair of devices will use: :JUST-WORKS, :PASSKEY-ENTRY or
+:NUMERIC-COMPARISON.
+
+Returned rather than requested, because a caller who insists on passkey entry
+against a peer with no keyboard is asking for something that cannot happen --
+better to report what will happen than to fail obscurely inside the exchange."
+  (if (not (or (logtest +smp-auth-mitm+ initiator-auth)
+               (logtest +smp-auth-mitm+ responder-auth)))
+      :just-works
+      (let ((i initiator-io) (r responder-io))
+        (cond
+          ;; Neither end has any way to involve a person.
+          ((or (= i +smp-io-no-input-no-output+) (= r +smp-io-no-input-no-output+))
+           :just-works)
+          ;; Both can show a number and answer yes or no.
+          ((and (member i (list +smp-io-display-yes-no+ +smp-io-keyboard-display+))
+                (member r (list +smp-io-display-yes-no+ +smp-io-keyboard-display+)))
+           :numeric-comparison)
+          ;; A display facing a keyboard, either way round.
+          ((or (and (member i (list +smp-io-display-only+ +smp-io-display-yes-no+
+                                    +smp-io-keyboard-display+))
+                    (member r (list +smp-io-keyboard-only+ +smp-io-keyboard-display+)))
+               (and (member i (list +smp-io-keyboard-only+ +smp-io-keyboard-display+))
+                    (member r (list +smp-io-display-only+ +smp-io-display-yes-no+
+                                    +smp-io-keyboard-display+))))
+           :passkey-entry)
+          (t :just-works)))))
+
+(defun passkey-octets (passkey)
+  "A six-digit passkey as the 128-bit value f6 takes, big-endian."
+  (let ((out (make-octets 16)))
+    (loop for i from 15 downto 0
+          for v = passkey then (ash v -8)
+          do (setf (aref out i) (logand v #xFF)))
+    out))
+
+(defun passkey-bit (passkey i)
+  "Bit I of the passkey, as the Z octet f4 takes during passkey entry: 0x80
+with the bit in its low position. Twenty of these, one per round, is what
+makes passkey entry twenty exchanges rather than one."
+  (logior #x80 (ldb (byte 1 i) passkey)))
 
 (defparameter +smp-failure-reasons+
   '((#x01 . "passkey entry failed") (#x02 . "OOB not available")
@@ -141,17 +209,18 @@ not stop the rest of the link."
 
 ;;; --- pairing ------------------------------------------------------------
 
-(defun %pairing-params (io)
+(defun %pairing-params (io &key mitm)
   "The three octets of a Pairing Request or Response that feed f6, plus the
 key-distribution octets. Secure Connections and bonding are both requested;
 without the SC bit the peer would answer with legacy pairing, which this does
 not implement."
   (vector io                                   ; IO capability
           #x00                                 ; OOB not present
-          (logior +smp-auth-bonding+ +smp-auth-sc+)))
+          (logior +smp-auth-bonding+ +smp-auth-sc+
+                  (if mitm +smp-auth-mitm+ 0))))
 
-(defun %send-pairing (conn opcode io)
-  (let ((p (cat (%pairing-params io)
+(defun %send-pairing (conn opcode io &key mitm)
+  (let ((p (cat (%pairing-params io :mitm mitm)
                 (vector 16       ; max encryption key size
                         #x00     ; initiator key distribution: none
                         #x00)))) ; responder key distribution: none
@@ -163,7 +232,7 @@ not implement."
     ;; in a way both ends of a self-test share -- so they agree with each
     ;; other and fail against anything else. A phone rejected exactly this
     ;; with "DHKey check failed".
-    (%iocap-triple (%pairing-params io))))
+    (%iocap-triple (%pairing-params io :mitm mitm))))
 
 (defun %iocap-triple (wire-params)
   "The three octets f6 wants, from a Pairing Request/Response's three: the
@@ -179,8 +248,97 @@ PDU includes the opcode, so the fields start at index 1."
           (aref pdu 2)              ; OOB data flag
           (aref pdu 1)))            ; IO capability
 
+(defun %single-nonce-round (session conn initiator timeout-ms)
+  "Just Works and numeric comparison: one exchange. Only the responder commits
+to a confirm value -- the initiator reveals its nonce first, and the
+responder\'s confirm is what binds it to a nonce chosen before it saw Na."
+  (let ((nonce (smp-random conn 16)))
+    (if initiator
+        (setf (smp-session-na session) nonce)
+        (setf (smp-session-nb session) nonce)))
+  (if initiator
+      (let ((cb (smp-next conn :expect +smp-pairing-confirm+
+                               :timeout-ms timeout-ms)))
+        (unless cb (smp-fail conn #x08))
+        (smp-send conn +smp-pairing-random+ (msb (smp-session-na session)))
+        (let ((rb (smp-next conn :expect +smp-pairing-random+
+                                 :timeout-ms timeout-ms)))
+          (unless rb (smp-fail conn #x08))
+          (setf (smp-session-nb session) (msb (subseq rb 1 17)))
+          (unless (equalp (smp-f4 (smp-session-peer-x session)
+                                  (smp-session-local-x session)
+                                  (smp-session-nb session) 0)
+                          (msb (subseq cb 1 17)))
+            (smp-fail conn #x04))))
+      (progn
+        (smp-send conn +smp-pairing-confirm+
+                  (msb (smp-f4 (smp-session-local-x session)
+                               (smp-session-peer-x session)
+                               (smp-session-nb session) 0)))
+        (let ((ra (smp-next conn :expect +smp-pairing-random+
+                                 :timeout-ms timeout-ms)))
+          (unless ra (smp-fail conn #x08))
+          (setf (smp-session-na session) (msb (subseq ra 1 17))))
+        (smp-send conn +smp-pairing-random+ (msb (smp-session-nb session))))))
+
+(defun %passkey-rounds (session conn initiator passkey timeout-ms)
+  "Twenty exchanges, one per bit of the passkey.
+
+Each round commits both ends to a fresh nonce before either reveals it, with
+the round\'s passkey bit mixed into the confirm. That is what makes passkey
+entry resistant to a man in the middle: an attacker who guesses wrong on any
+bit is caught on that round, and cannot go back. It is also why this is twenty
+round trips rather than one -- the cost of leaking the passkey one bit at a
+time instead of all at once.
+
+The nonces from the LAST round are the Na and Nb that go on to f5 and f6."
+  (dotimes (i 20)
+    (let ((z (passkey-bit passkey i))
+          (nonce (smp-random conn 16)))
+      (if initiator
+          (setf (smp-session-na session) nonce)
+          (setf (smp-session-nb session) nonce))
+      (flet ((my-confirm ()
+               (msb (smp-f4 (smp-session-local-x session)
+                            (smp-session-peer-x session)
+                            (if initiator (smp-session-na session)
+                                (smp-session-nb session))
+                            z)))
+             (check-peer (confirm peer-nonce)
+               (unless (equalp (smp-f4 (smp-session-peer-x session)
+                                       (smp-session-local-x session)
+                                       peer-nonce z)
+                               (msb (subseq confirm 1 17)))
+                 (smp-fail conn #x04))))
+        (if initiator
+            (progn
+              (smp-send conn +smp-pairing-confirm+ (my-confirm))
+              (let ((cb (smp-next conn :expect +smp-pairing-confirm+
+                                       :timeout-ms timeout-ms)))
+                (unless cb (smp-fail conn #x08))
+                (smp-send conn +smp-pairing-random+
+                          (msb (smp-session-na session)))
+                (let ((rb (smp-next conn :expect +smp-pairing-random+
+                                         :timeout-ms timeout-ms)))
+                  (unless rb (smp-fail conn #x08))
+                  (setf (smp-session-nb session) (msb (subseq rb 1 17)))
+                  (check-peer cb (smp-session-nb session)))))
+            (let ((ca (smp-next conn :expect +smp-pairing-confirm+
+                                     :timeout-ms timeout-ms)))
+              (unless ca (smp-fail conn #x08))
+              (smp-send conn +smp-pairing-confirm+ (my-confirm))
+              (let ((ra (smp-next conn :expect +smp-pairing-random+
+                                       :timeout-ms timeout-ms)))
+                (unless ra (smp-fail conn #x08))
+                (setf (smp-session-na session) (msb (subseq ra 1 17)))
+                (check-peer ca (smp-session-na session))
+                (smp-send conn +smp-pairing-random+
+                          (msb (smp-session-nb session))))))))))
+
 (defun smp-pair (conn &key (role :central) local-addr local-addr-type
-                           peer-addr peer-addr-type (timeout-ms 20000))
+                           peer-addr peer-addr-type (timeout-ms 20000)
+                           (io-capability :no-input-no-output)
+                           passkey passkey-fn confirm-fn)
   "Pair over an established connection and return an SMP-SESSION whose LTK is
 ready to encrypt with.
 
@@ -189,7 +347,12 @@ this library; both are needed because f5 and f6 bind the keys to them, which
 is what stops a derived key being replayed against a different pair of
 devices."
   (let* ((initiator (eq role :central))
-         (io +smp-io-no-input-no-output+)
+         (io (io-capability-code io-capability))
+         ;; Asking for MITM protection only means anything if this device can
+         ;; actually take part in it; claiming it with no input and no output
+         ;; would negotiate a model that then falls back to Just Works anyway.
+         (mitm (/= io +smp-io-no-input-no-output+))
+         (model :just-works)
          (session (make-smp-session
                    :conn conn :role role
                    :local-addr (%smp-addr local-addr local-addr-type)
@@ -198,7 +361,7 @@ devices."
     (if initiator
         (progn
           (setf (smp-session-local-io session)
-                (%send-pairing conn +smp-pairing-request+ io))
+                (%send-pairing conn +smp-pairing-request+ io :mitm mitm))
           (let ((rsp (smp-next conn :expect +smp-pairing-response+
                                     :timeout-ms timeout-ms)))
             (unless rsp (smp-fail conn #x08))
@@ -214,7 +377,26 @@ devices."
           (setf (smp-session-peer-io session) (%peer-iocap req))
           (unless (logtest +smp-auth-sc+ (aref req 3)) (smp-fail conn #x03))
           (setf (smp-session-local-io session)
-                (%send-pairing conn +smp-pairing-response+ io))))
+                (%send-pairing conn +smp-pairing-response+ io :mitm mitm))))
+
+    ;; The model falls out of both sides' capabilities; neither end chooses
+    ;; it alone. Both compute it from the same two triples and must agree, or
+    ;; one would be running twenty rounds while the other ran one.
+    (let ((mine (smp-session-local-io session))
+          (theirs (smp-session-peer-io session)))
+      (setf model (if initiator
+                      (smp-association-model (aref mine 2) (aref theirs 2)
+                                             (aref mine 0) (aref theirs 0))
+                      (smp-association-model (aref theirs 2) (aref mine 2)
+                                             (aref theirs 0) (aref mine 0)))))
+    (%trace-value "model" (vector (position model '(:just-works :passkey-entry
+                                                    :numeric-comparison))))
+    (when (eq model :passkey-entry)
+      (setf passkey (or passkey
+                        (and passkey-fn (funcall passkey-fn model))
+                        (smp-fail conn #x01)))
+      (unless (and (integerp passkey) (<= 0 passkey 999999))
+        (smp-fail conn #x01)))
 
     ;; 2. public keys
     (multiple-value-bind (priv x y) (smp-generate-keypair)
@@ -234,39 +416,11 @@ devices."
                      (smp-session-peer-y session) (msb (subseq pk 33 65))))))
       (if initiator (progn (send-key) (recv-key)) (progn (recv-key) (send-key))))
 
-    ;; 3. confirm and nonces. Only the responder commits to a confirm value;
-    ;;    the initiator reveals its nonce first and the responder's confirm is
-    ;;    what binds it to a nonce it chose before seeing Na.
-    (let ((nonce (smp-random conn 16)))
-      (if initiator
-          (setf (smp-session-na session) nonce)
-          (setf (smp-session-nb session) nonce)))
-    (if initiator
-        (let ((cb (smp-next conn :expect +smp-pairing-confirm+
-                                 :timeout-ms timeout-ms)))
-          (unless cb (smp-fail conn #x08))
-          (smp-send conn +smp-pairing-random+ (msb (smp-session-na session)))
-          (let ((rb (smp-next conn :expect +smp-pairing-random+
-                                   :timeout-ms timeout-ms)))
-            (unless rb (smp-fail conn #x08))
-            (setf (smp-session-nb session) (msb (subseq rb 1 17)))
-            ;; Check the responder kept its word.
-            (let ((expected (smp-f4 (smp-session-peer-x session)
-                                    (smp-session-local-x session)
-                                    (smp-session-nb session) 0)))
-              (unless (equalp expected (msb (subseq cb 1 17)))
-                (smp-fail conn #x04)))))
-        (progn
-          (smp-send conn +smp-pairing-confirm+
-                    (msb (smp-f4 (smp-session-local-x session)
-                                 (smp-session-peer-x session)
-                                 (smp-session-nb session) 0)))
-          (let ((ra (smp-next conn :expect +smp-pairing-random+
-                                   :timeout-ms timeout-ms)))
-            (unless ra (smp-fail conn #x08))
-            (setf (smp-session-na session) (msb (subseq ra 1 17))))
-          (smp-send conn +smp-pairing-random+ (msb (smp-session-nb session)))))
-
+    ;; 3. confirm and nonces -- the one phase the association model changes.
+    (when (eq model :passkey-entry)
+      (%passkey-rounds session conn initiator passkey timeout-ms))
+    (unless (eq model :passkey-entry)
+      (%single-nonce-round session conn initiator timeout-ms))
     ;; 4. shared secret and keys
     (let* ((dhkey (smp-dhkey (smp-session-local-priv session)
                              (smp-session-peer-x session)
@@ -292,7 +446,21 @@ devices."
         ;; 5. check values, each computed over the other side's IO capability
         ;;    and address, so agreeing proves both derived the same key from
         ;;    the same transcript.
-        (let* ((zero (make-octets 16))
+        (when (eq model :numeric-comparison)
+          (let ((digits (smp-g2 (if initiator (smp-session-local-x session)
+                                    (smp-session-peer-x session))
+                                (if initiator (smp-session-peer-x session)
+                                    (smp-session-local-x session))
+                                (smp-session-na session)
+                                (smp-session-nb session))))
+            ;; Both ends show the same six digits; a person says whether they
+            ;; match. Refusing is what stops a man in the middle, so a caller
+            ;; with no way to ask must not silently accept.
+            (unless (and confirm-fn (funcall confirm-fn digits))
+              (smp-fail conn #x0C))))
+        (let* ((zero (if (eq model :passkey-entry)
+                         (passkey-octets passkey)
+                         (make-octets 16)))
                (ea (smp-f6 mackey (smp-session-na session) (smp-session-nb session)
                            zero (if initiator (smp-session-local-io session)
                                     (smp-session-peer-io session))

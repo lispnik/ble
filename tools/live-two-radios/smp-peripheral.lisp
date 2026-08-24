@@ -45,7 +45,11 @@
                                                 :local-addr local-addr
                                                 :local-addr-type :public
                                                 :peer-addr peer
-                                                :peer-addr-type :public)))
+                                                :peer-addr-type :public
+                                           :io-capability :display-only
+                                           :passkey (parse-integer
+                                                     (or (sb-ext:posix-getenv "PASSKEY")
+                                                         "123456")))))
                     (format t "~&[p] PAIRED, LTK ~{~2,'0X~}~%"
                             (coerce (smp-session-ltk session) 'list))
                     (force-output)
