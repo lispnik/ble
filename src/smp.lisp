@@ -147,6 +147,17 @@ byte-order mistake from a wiring one.")
             (coerce octets 'list))
     (force-output *trace-output*)))
 
+(defun smp-random-octets (sock n)
+  "N random octets from the controller attached to SOCK.
+
+Takes a socket rather than a connection because an address has to be chosen
+before there is anything to connect with."
+  (let ((out (make-octets n)))
+    (loop for off from 0 below n by 8
+          do (let ((r (hci-do-command sock +ogf-le+ #x0018 #() :name "LE Rand")))
+               (replace out r :start1 off :end1 (min n (+ off 8)))))
+    out))
+
 (defun smp-random (conn n)
   "N random octets from the controller's generator.
 
@@ -432,7 +443,16 @@ devices."
                                       :timeout-ms timeout-ms)))
                (unless (and pk (>= (length pk) 65)) (smp-fail conn #x0A))
                (setf (smp-session-peer-x session) (msb (subseq pk 1 33))
-                     (smp-session-peer-y session) (msb (subseq pk 33 65))))))
+                     (smp-session-peer-y session) (msb (subseq pk 33 65)))
+               (%trace-value "peer PKx" (smp-session-peer-x session))
+               (%trace-value "peer PKy" (smp-session-peer-y session))
+               ;; Refuse a point that is not on P-256. Multiplying by one can
+               ;; leak the private scalar, and it is also how a byte-order
+               ;; mistake announces itself here rather than as an unexplained
+               ;; check-value mismatch four steps later.
+               (unless (smp-public-key-valid-p (smp-session-peer-x session)
+                                               (smp-session-peer-y session))
+                 (smp-fail conn #x0A)))))
       (if initiator (progn (send-key) (recv-key)) (progn (recv-key) (send-key))))
 
     ;; 3. confirm and nonces -- the one phase the association model changes.

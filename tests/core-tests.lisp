@@ -115,3 +115,17 @@ between -60 dBm and a cheerful 196."
   (is (= -128 (ble:s8 #(128) 0)) "and the bottom of the negative one")
   (is (= -1 (ble:s8 #(255) 0)))
   (is (= -60 (ble:s8 #(0 #xC4) 1)) "a plausible connection RSSI"))
+
+(test a-static-random-address-has-both-top-bits-set
+  "The two most significant bits identify the address as static random, and
+on-air order puts the most significant octet last -- the usual place to get
+this wrong."
+  (let ((a (ble:static-random-address #(1 2 3 4 5 6))))
+    (is (= #xC6 (aref a 5)) "the top two bits are forced on, the rest kept")
+    (is (equalp #(1 2 3 4 5) (subseq a 0 5)) "and nothing else is touched")
+    (is-true (ble:static-random-address-p a)))
+  (is-false (ble:static-random-address-p #(1 2 3 4 5 6))
+            "an address without them is not one")
+  (is-false (ble:static-random-address-p (ble:static-random-address
+                                          (ble:make-octets 6)))
+            "all-zero is reserved, even with the bits set"))

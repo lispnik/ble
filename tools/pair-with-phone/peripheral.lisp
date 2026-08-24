@@ -25,6 +25,23 @@
   "Something for the phone to discover. A phone that finds no services often
 disconnects before anyone gets round to pairing."
   (let ((server (make-gatt-server :mtu 23)))
+    ;; Generic Access first, because iOS reads it the moment it connects and
+    ;; a peripheral without it is a well-known way to get connected to and
+    ;; then dropped. It must be the first service: handles are allocated in
+    ;; order and GAP is expected at the bottom of the database.
+    (gatt-add-service server #x1800)
+    (gatt-add-characteristic server :uuid #x2A00 :properties '(:read)
+                                    :value *name*)          ; Device Name
+    (gatt-add-characteristic server :uuid #x2A01 :properties '(:read)
+                                    :value #(#xC0 #x03))    ; Appearance: generic tag
+    ;; Generic Attribute, with Service Changed. This is how a peripheral tells
+    ;; a client its database moved. Clients cache the database by address and
+    ;; do not re-discover on reconnect -- iOS notably -- so without this, a
+    ;; peripheral that gains a characteristic keeps showing the old set until
+    ;; the client's cache is cleared by other means.
+    (gatt-add-service server #x1801)
+    (gatt-add-characteristic server :uuid #x2A05 :properties '(:indicate)
+                                    :value #(1 0 255 255))
     (gatt-add-service server #x180A)                       ; Device Information
     (gatt-add-characteristic server :uuid #x2A29 :properties '(:read)
                                     :value "lispnik")
@@ -52,17 +69,26 @@ disconnects before anyone gets round to pairing."
 
 (let ((server (build-server)))
   (with-hci-user-socket (sock +dev+)
-    (let ((local-addr (hci-read-bd-addr :sock sock)))
+    ;; Advertise from a fresh static random address every run. iOS caches a
+    ;; GATT database by address and only re-discovers on a Service Changed
+    ;; indication from a BONDED peer -- so an unbonded peripheral that gains a
+    ;; characteristic keeps being shown its old database forever. A new
+    ;; address is a device it has never met, which sidesteps the cache
+    ;; entirely. The address is also bound into the pairing keys, so it has to
+    ;; be the one handed to SMP-PAIR.
+    (let ((local-addr (static-random-address (smp-random-octets sock 6))))
+      (set-random-address sock local-addr)
       (format t "~&================================================~%")
       (format t "~&Advertising as ~S on hci~D (~A)~%" *name* +dev+
               (format-mac local-addr))
       (format t "~&Connect, then READ characteristic FFE2 (\"secret\") in~%~
                    service FFE0. It is protected, so the read comes back~%~
                    Insufficient Authentication and the phone will pair.~%")
+      (format t "~&build: random-address+gap+gatt+trace~%")
       (format t "~&Waiting up to ~D minutes...~%" +minutes+)
       (format t "~&================================================~%")
       (force-output)
-      (set-adv-parameters sock :adv-type +adv-ind+ :own-addr-type 0)
+      (set-adv-parameters sock :adv-type +adv-ind+ :own-addr-type 1)
       (set-adv-data sock (adv-payload))
       (with-advertising (sock)
         (let ((deadline (+ (get-internal-real-time)
@@ -108,25 +134,50 @@ disconnects before anyone gets round to pairing."
                    (when (zerop (aref pkt 3)) (return)))
                   ((and (>= (length pkt) 4) (= (aref pkt 0) #x04)
                         (= (aref pkt 1) #x05))
-                   (format t "~&phone disconnected~%") (force-output)
-                   (setf conn nil session nil asked nil)))))
+                   ;; Connectable advertising stops the moment a central
+                   ;; connects, so a peripheral that does not restart it
+                   ;; disappears after the first connection -- which looks
+                   ;; from the other side like the device being switched off.
+                   (format t "~&phone disconnected (reason 0x~2,'0X); ~
+                              advertising again~%"
+                           (if (>= (length pkt) 6) (aref pkt 5) 0))
+                   (force-output)
+                   (setf conn nil session nil asked nil)
+                   (set-adv-enable sock t)))))
             (when conn
-              ;; serve the database
+              ;; serve the database, and say what was asked for. Inferring
+              ;; from silence is what made the last three attempts useless:
+              ;; a phone that connects and leaves looks identical whether it
+              ;; never asked for the protected value or asked and refused.
               (let ((op (gatt-serve server conn :timeout-ms 20)))
+                (when (and op (not (eq op :disconnected)))
+                  (format t "~&  att request 0x~2,'0X~@[ (~A)~]~%" op
+                          (case op (#x02 "exchange MTU") (#x04 "find info")
+                                   (#x08 "read by type") (#x0A "read")
+                                   (#x0C "read blob") (#x10 "read by group type")
+                                   (#x12 "write") (#x52 "write command")
+                                   (#x06 "find by type value") (t nil)))
+                  (force-output))
                 (when (eq op :disconnected)
-                  (format t "~&phone disconnected~%") (force-output)
-                  (setf conn nil session nil asked nil)))
+                  (format t "~&phone disconnected; advertising again~%")
+                  (force-output)
+                  (setf conn nil session nil asked nil)
+                  (set-adv-enable sock t)))
               ;; ask once, then respond to the pairing it triggers
               (when (and conn (consp session) (not asked))
                 (setf asked t)
                 (format t "~&asking the phone to pair...~%") (force-output)
                 (smp-request-security conn))
+              (when (and conn (hci-conn-smp-pending conn))
+                (format t "~&  smp frame 0x~2,'0X arrived~%"
+                        (aref (first (hci-conn-smp-pending conn)) 0))
+                (force-output))
               (when (and conn (consp session) (hci-conn-smp-pending conn))
                 (destructuring-bind (peer ptype) session
                   (handler-case
                       (let ((s (smp-pair conn :role :peripheral
                                               :local-addr local-addr
-                                              :local-addr-type :public
+                                              :local-addr-type :random
                                               :peer-addr peer
                                               :peer-addr-type ptype
                                               :timeout-ms 60000)))

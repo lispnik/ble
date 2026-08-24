@@ -22,6 +22,7 @@
 
 ;;; --- HCI command OCFs ------------------------------------------------
 
+(defconstant +ocf-le-set-random-address+          #x0005)
 (defconstant +ocf-le-set-adv-set-random-address+   #x0035)
 (defconstant +ocf-le-set-extended-adv-parameters+  #x0036)
 (defconstant +ocf-le-set-extended-adv-data+        #x0037)
@@ -42,6 +43,21 @@
 ;;; u16le-put and u24le-put live in octets.lisp.
 
 ;;; --- HCI advertising commands ---------------------------------------
+
+(defun set-random-address (sock mac)
+  "LE Set Random Address: the address legacy advertising uses when
+OWN-ADDR-TYPE is 1. MAC is in on-air order.
+
+Distinct from SET-ADV-SET-RANDOM-ADDRESS, which sets one advertising set\'s
+address under the extended commands. This is the controller-wide one, and it
+is what a legacy advertiser needs.
+
+Changing address makes a peripheral a different device to anything that
+remembers the old one -- which is occasionally exactly what you want. Clients
+cache a GATT database by address and will not re-discover it; iOS honours
+Service Changed only from a bonded peer, so an unbonded peripheral that gains
+a characteristic is invisible in that respect until its address changes."
+  (send-hci-command sock +ogf-le+ +ocf-le-set-random-address+ (coerce-octets mac)))
 
 (defun set-adv-set-random-address (sock handle mac)
   "Bind a 6-byte random BD_ADDR to advertising set HANDLE. The high two

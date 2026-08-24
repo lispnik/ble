@@ -53,9 +53,17 @@ deploy:
 	@# so root-owned fasls land in the user's cache and a plain rm cannot
 	@# shift them. Verified rather than assumed -- a cache that silently
 	@# survives is exactly the failure this target exists to prevent.
-	ssh $(HOST) 'sudo -n rm -rf ~/.cache/common-lisp /root/.cache/common-lisp'
-	ssh $(HOST) 'test -z "$$(find ~/.cache/common-lisp -name "*.fasl" 2>/dev/null | head -1)"' \
-	  && echo "==> deployed to $(HOST):$(DEST), remote fasl cache verified empty" \
+	@# Only OUR fasls. Clearing the whole cache also throws away the
+	@# vendored dependencies, and rebuilding ironclad alone costs minutes on
+	@# a Pi -- paid on every deploy, for sources that never changed.
+	ssh $(HOST) 'sudo -n find ~/.cache/common-lisp /root/.cache/common-lisp \
+	               \( -path "*/ble/src/*" -o -path "*/ble/tests/*" \) \
+	               -delete 2>/dev/null; exit 0'
+	@# Verified, not assumed: a cache that silently survives is the whole
+	@# failure this target exists to prevent.
+	ssh $(HOST) 'test -z "$$(find ~/.cache/common-lisp /root/.cache/common-lisp \
+	               -path "*/ble/src/*" -name "*.fasl" 2>/dev/null | head -1)"' \
+	  && echo "==> deployed to $(HOST):$(DEST), stale fasls for ble/src cleared" \
 	  || (echo "deploy: remote fasl cache NOT cleared" >&2; exit 1)
 
 clean:

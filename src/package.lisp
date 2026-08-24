@@ -35,6 +35,8 @@
    #:octets
    #:make-octets
    #:coerce-octets
+   #:static-random-address
+   #:static-random-address-p
    #:s8
    #:u16-le
    #:s16-le

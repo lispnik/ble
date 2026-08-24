@@ -80,6 +80,7 @@
           adv-report-data
           adv-report-rssi
           ;; Extended advertising (transmit)
+          set-random-address
           set-adv-set-random-address
           set-extended-adv-parameters
           set-extended-adv-data
@@ -277,12 +278,14 @@
           smp-error-source
           *smp-trace*
           smp-random
+          smp-random-octets
           smp-f4
           smp-f5
           smp-f6
           smp-g2
           smp-generate-keypair
           smp-dhkey
+          smp-public-key-valid-p
           aes-cmac
           msb
           ;; Giving the adapter back (src/teardown.lisp)

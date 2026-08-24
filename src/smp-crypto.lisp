@@ -88,6 +88,36 @@ different exchange."
         ;; Uncompressed point: 0x04 || X (32) || Y (32)
         (values private (subseq y 1 33) (subseq y 33 65))))))
 
+(defparameter +p256-p+
+  (- (expt 2 256) (expt 2 224) (- (expt 2 192)) (- (expt 2 96)) 1)
+  "The P-256 prime, 2^256 - 2^224 + 2^192 + 2^96 - 1.")
+
+(defparameter +p256-b+
+  #x5AC635D8AA3A93E7B3EBBD55769886BC651D06B0CC53B0F63BCE3C3E27D2604B)
+
+(defun %octets-to-int (v)
+  (reduce (lambda (acc b) (+ (* acc 256) b)) (coerce v 'list) :initial-value 0))
+
+(defun smp-public-key-valid-p (x y)
+  "Is (X, Y) actually on P-256?
+
+Required, not defensive. A peer that sends a point off the curve can, against
+an implementation that multiplies by it anyway, learn the private scalar --
+the invalid-curve attack. Refusing is the only correct response.
+
+It also catches the mundane version of the same thing: a coordinate assembled
+in the wrong byte order is almost never on the curve, and without this check
+that surfaces as a shared secret which is merely *different* from the peer\'s,
+which in turn surfaces as a check value mismatch several steps later with
+nothing pointing at the cause."
+  (let ((xi (%octets-to-int x))
+        (yi (%octets-to-int y))
+        (p +p256-p+))
+    (and (< 0 xi p) (< 0 yi p)
+         ;; y^2 = x^3 - 3x + b  (mod p)
+         (= (mod (* yi yi) p)
+            (mod (+ (* xi xi xi) (* -3 xi) +p256-b+) p)))))
+
 (defun smp-dhkey (private peer-x peer-y)
   "The X coordinate of the shared point: 32 octets, crypto order."
   (let* ((point (cat (vector #x04) peer-x peer-y))

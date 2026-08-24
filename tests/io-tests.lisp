@@ -1565,3 +1565,22 @@ this library's history."
     (is (= 1 (length (ble::hci-conn-pending conn))) "the ATT frame is kept")
     (is (= 1 (length (ble::hci-conn-sig-pending conn)))
         "and so is the signalling frame, in its own queue")))
+
+(test a-public-key-off-the-curve-is-recognised
+  "Required rather than defensive: multiplying by a point that is not on the
+curve can leak the private scalar. It also catches the mundane cause -- a
+coordinate assembled in the wrong byte order is essentially never on the
+curve, and without this check that shows up as a mismatched check value
+several steps later with nothing pointing at why."
+  (multiple-value-bind (priv x y) (ble:smp-generate-keypair)
+    (declare (ignore priv))
+    (is-true (ble:smp-public-key-valid-p x y)
+             "a key we generated ourselves is on the curve")
+    (let ((bad (copy-seq y)))
+      (setf (aref bad 31) (logxor 1 (aref bad 31)))
+      (is-false (ble:smp-public-key-valid-p x bad)
+                "one flipped bit takes it off"))
+    (is-false (ble:smp-public-key-valid-p x (reverse y))
+              "and so does the wrong byte order, which is the likely cause")
+    (is-false (ble:smp-public-key-valid-p (ble:make-octets 32) (ble:make-octets 32))
+              "zero is not a point on this curve")))

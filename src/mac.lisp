@@ -41,3 +41,22 @@ failure mode this whole file exists to prevent."
                        (lambda (p) (parse-integer p :radix 16)) parts))
       (parse-error () (error 'invalid-mac :string string))
       (type-error  () (error 'invalid-mac :string string)))))
+
+(defun static-random-address (octets)
+  "Turn six random octets into a valid static random address.
+
+The two most significant bits must both be 1; the rest is free, and must not
+be all-zero or all-one across the remaining 46. On-air order is LSB first, so
+the most significant octet is the last one."
+  (let ((a (coerce-octets octets)))
+    (setf (aref a 5) (logior (aref a 5) #xC0))
+    a))
+
+(defun static-random-address-p (mac)
+  "Is MAC a valid static random address? On-air order."
+  (and (= 6 (length mac))
+       (= #xC0 (logand (aref mac 5) #xC0))
+       ;; all-zero and all-one are reserved
+       (not (every #'zerop (list (logand (aref mac 5) #x3F) (aref mac 4)
+                                 (aref mac 3) (aref mac 2) (aref mac 1)
+                                 (aref mac 0))))))
