@@ -167,6 +167,13 @@ characteristic does not notify."
                                  (make-gatt-attribute
                                   :handle h :uuid (uuid16 +gatt-cccd+)
                                   :permissions '(:read :write)
+                                  ;; The descriptor inherits the
+                                  ;; characteristic's requirement. Subscribing
+                                  ;; to a value you are not allowed to read
+                                  ;; would otherwise be a way around it, and
+                                  ;; the notifications would carry exactly
+                                  ;; what the read refused.
+                                  :security security
                                   :value (make-octets 2)))
                 h))))
       (values value-handle cccd-handle))))
@@ -296,6 +303,21 @@ first that differs."
          (type (subseq pdu 5))
          (attrs (remove-if-not (lambda (a) (equalp type (gatt-attribute-uuid a)))
                                (%attributes-in-range server start end))))
+    ;; Permissions apply here exactly as they do to a plain read. This is not
+    ;; a discovery-only path: reading a characteristic BY UUID is a Read By
+    ;; Type, and it is how a client actually fetches a value when it knows the
+    ;; UUID but not the handle -- nRF Connect's read button, for one. Checking
+    ;; only in %HANDLE-READ left every protected attribute readable by anyone
+    ;; who asked for it this way instead.
+    (let ((first-attr (first attrs)))
+      (when first-attr
+        (let ((code (or (%security-shortfall server first-attr)
+                        (unless (%readable-p first-attr)
+                          +att-err-read-not-permitted+))))
+          (when code
+            (return-from %handle-read-by-type
+              (%send-att-error chan +att-read-by-type-req+
+                               (gatt-attribute-handle first-attr) code))))))
     (if (null attrs)
         (%send-att-error chan +att-read-by-type-req+ start +att-err-attr-not-found+)
         (let* ((first-value (gatt-attribute-read server (first attrs)))
@@ -389,6 +411,13 @@ than answered emptily, or a client cannot tell 'none' from 'not that kind'."
                         (%send-att-error chan +att-read-multiple-req+
                                          (u16-le pdu off)
                                          +att-err-read-not-permitted+)))
+                     ;; Same reasoning as Read By Type: a second way to reach
+                     ;; a value is a second way to bypass its permissions.
+                     ((%security-shortfall server attr)
+                      (return-from %handle-read-multiple
+                        (%send-att-error chan +att-read-multiple-req+
+                                         (u16-le pdu off)
+                                         (%security-shortfall server attr))))
                      (t (push (gatt-attribute-read server attr) values)))))
     (let* ((blob (apply #'concatenate '(simple-array (unsigned-byte 8) (*))
                         (nreverse values)))
@@ -526,11 +555,38 @@ would hand whoever wrote next a half-built value to commit on top of."
     ;; the client is entitled to drop.
     (setf (gatt-server-mtu server) (max 23 (min client ours)))))
 
+(defvar *gatt-server-trace* nil
+  "When true, print each request as it is answered: the opcode, and the handle
+or UUID it concerns. An opcode alone is not enough to follow a client -- a
+read by UUID and a discovery walk are both Read By Type, and telling them
+apart is exactly what you need when a client is not doing what you expected.")
+
+(defun %trace-request (pdu)
+  (when *gatt-server-trace*
+    (let ((op (aref pdu 0)))
+      (format *trace-output* "~&  att 0x~2,'0X ~A~@[ ~A~]~%" op
+              (case op (#x02 "exchange-mtu") (#x04 "find-info")
+                       (#x06 "find-by-type-value") (#x08 "read-by-type")
+                       (#x0A "read") (#x0C "read-blob") (#x0E "read-multiple")
+                       (#x10 "read-by-group-type") (#x12 "write")
+                       (#x16 "prepare-write") (#x18 "execute-write")
+                       (#x52 "write-cmd") (t "?"))
+              (case op
+                ;; the UUID being asked for, which is the interesting part
+                ((#x08 #x10) (when (>= (length pdu) 7)
+                               (uuid-string (subseq pdu 5))))
+                ((#x0A #x0C #x12 #x52) (when (>= (length pdu) 3)
+                                         (format nil "handle 0x~4,'0X"
+                                                 (u16-le pdu 1))))
+                (t nil)))
+      (force-output *trace-output*))))
+
 (defun gatt-serve-pdu (server chan pdu)
   "Answer one ATT request. Returns the opcode handled, or NIL if PDU was not a
 request this server implements -- in which case it has already sent the Error
 Response that says so."
   (when (and pdu (vectorp pdu) (plusp (length pdu)))
+    (%trace-request pdu)
     (let ((op (aref pdu 0)))
       (macrolet ((need (n) `(unless (>= (length pdu) ,n)
                               (return-from gatt-serve-pdu nil))))

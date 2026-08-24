@@ -11,7 +11,7 @@
        :ignore-inherited-configuration))
 (handler-bind ((warning #'muffle-warning)) (asdf:load-system :ble))
 (in-package #:ble)
-(setf *smp-trace* t)
+(setf *smp-trace* t *gatt-server-trace* t)
 
 (defun env-int (name d)
   (let ((v (sb-ext:posix-getenv name)))
@@ -40,8 +40,14 @@ disconnects before anyone gets round to pairing."
     ;; peripheral that gains a characteristic keeps showing the old set until
     ;; the client's cache is cleared by other means.
     (gatt-add-service server #x1801)
+    ;; Protected deliberately. The log shows iOS writing this CCCD on every
+    ;; connection, unprompted, to subscribe to Service Changed -- so requiring
+    ;; encryption on it makes the phone pair of its own accord, with nobody
+    ;; tapping anything. A peripheral cannot start pairing; all it can do is
+    ;; require security on something the central already wants.
     (gatt-add-characteristic server :uuid #x2A05 :properties '(:indicate)
-                                    :value #(1 0 255 255))
+                                    :value #(1 0 255 255)
+                                    :security :encrypted)
     (gatt-add-service server #x180A)                       ; Device Information
     (gatt-add-characteristic server :uuid #x2A29 :properties '(:read)
                                     :value "lispnik")
@@ -138,9 +144,12 @@ disconnects before anyone gets round to pairing."
                    ;; connects, so a peripheral that does not restart it
                    ;; disappears after the first connection -- which looks
                    ;; from the other side like the device being switched off.
+                   ;; Disconnection Complete: status(1) handle(2) reason(1),
+                   ;; so the reason is at 6. Reading 5 gave the handle's high
+                   ;; byte -- a constant zero dressed up as a diagnosis.
                    (format t "~&phone disconnected (reason 0x~2,'0X); ~
                               advertising again~%"
-                           (if (>= (length pkt) 6) (aref pkt 5) 0))
+                           (if (>= (length pkt) 7) (aref pkt 6) 255))
                    (force-output)
                    (setf conn nil session nil asked nil)
                    (set-adv-enable sock t)))))
@@ -150,14 +159,7 @@ disconnects before anyone gets round to pairing."
               ;; a phone that connects and leaves looks identical whether it
               ;; never asked for the protected value or asked and refused.
               (let ((op (gatt-serve server conn :timeout-ms 20)))
-                (when (and op (not (eq op :disconnected)))
-                  (format t "~&  att request 0x~2,'0X~@[ (~A)~]~%" op
-                          (case op (#x02 "exchange MTU") (#x04 "find info")
-                                   (#x08 "read by type") (#x0A "read")
-                                   (#x0C "read blob") (#x10 "read by group type")
-                                   (#x12 "write") (#x52 "write command")
-                                   (#x06 "find by type value") (t nil)))
-                  (force-output))
+
                 (when (eq op :disconnected)
                   (format t "~&phone disconnected; advertising again~%")
                   (force-output)

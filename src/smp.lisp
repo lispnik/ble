@@ -468,6 +468,14 @@ devices."
                    (smp-session-peer-addr session)))
            (a2 (if initiator (smp-session-peer-addr session)
                    (smp-session-local-addr session))))
+      ;; Enough to recompute the shared secret independently. Without our own
+      ;; key in the trace there is no way to tell a wrong secret from a
+      ;; correct one computed against a key the peer never received.
+      (%trace-value "our PKx" (smp-session-local-x session))
+      (%trace-value "our PKy" (smp-session-local-y session))
+      (%trace-value "our priv"
+                    (getf (ironclad:destructure-private-key
+                           (smp-session-local-priv session)) :x))
       (%trace-value "dhkey" dhkey)
       (%trace-value "Na" (smp-session-na session))
       (%trace-value "Nb" (smp-session-nb session))

@@ -200,6 +200,7 @@
           gatt-service-entry-end
           gatt-service-entry-uuid
           gatt-serve
+          *gatt-server-trace*
           *max-prepared-writes*
           +max-attribute-length+
           gatt-serve-pdu

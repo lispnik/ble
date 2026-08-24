@@ -1584,3 +1584,71 @@ several steps later with nothing pointing at why."
               "and so does the wrong byte order, which is the likely cause")
     (is-false (ble:smp-public-key-valid-p (ble:make-octets 32) (ble:make-octets 32))
               "zero is not a point on this curve")))
+
+(test security-cannot-be-bypassed-by-reading-by-uuid
+  "Read By Type is not a discovery-only path: it is how a client fetches a
+value when it knows the UUID but not the handle, which is what nRF Connect's
+read button does. Enforcing security only in the plain-read handler left every
+protected attribute readable by anyone who asked this way -- and, because the
+client never saw Insufficient Authentication, it never had reason to pair."
+  (let ((server (ble:make-gatt-server :mtu 247)))
+    (ble:gatt-add-service server #xFFE0)
+    (let* ((h (ble:gatt-add-characteristic server :uuid #xFFE1
+                                                  :properties '(:read)
+                                                  :value "secret"
+                                                  :security :encrypted))
+           (lb (make-loopback server))
+           (chan (loopback-client lb))
+           (req (ble:make-octets 7)))
+      (declare (ignore h))
+      (setf (aref req 0) #x08)                  ; Read By Type
+      (ble:u16le-put req 1 1)
+      (ble:u16le-put req 3 #xFFFF)
+      (replace req (ble:uuid16 #xFFE1) :start1 5)
+      (let ((rsp (ble:att-request chan req)))
+        (is-true (ble:att-error-p rsp)
+                 "a protected value must not come back by UUID either")
+        (is (= #x05 (aref rsp 4)) "insufficient authentication"))
+      ;; and once encrypted, the same request succeeds
+      (setf (ble:gatt-server-encrypted server) t)
+      (let ((rsp (ble:att-request chan req)))
+        (is (not (ble:att-error-p rsp)) "readable once the link is encrypted")))))
+
+(test read-multiple-cannot-bypass-security-either
+  (let ((server (ble:make-gatt-server :mtu 247)))
+    (ble:gatt-add-service server #xFFE0)
+    (let* ((open-h (ble:gatt-add-characteristic server :uuid #xFFE1
+                                                       :properties '(:read)
+                                                       :value #(1)))
+           (prot-h (ble:gatt-add-characteristic server :uuid #xFFE2
+                                                       :properties '(:read)
+                                                       :value #(2)
+                                                       :security :encrypted))
+           (lb (make-loopback server))
+           (chan (loopback-client lb)))
+      (multiple-value-bind (value err)
+          (ble:att-read-multiple chan (list open-h prot-h))
+        (is (null value) "no values at all when one of them is protected")
+        (is (= #x05 err) "and the reason names the security shortfall")))))
+
+(test a-protected-characteristics-cccd-is-protected-too
+  "Subscribing to a value you may not read would otherwise be a way around
+the requirement -- the notifications carry exactly what the read refused."
+  (let ((server (ble:make-gatt-server :mtu 247)))
+    (ble:gatt-add-service server #xFFE0)
+    (multiple-value-bind (value-handle cccd-handle)
+        (ble:gatt-add-characteristic server :uuid #xFFE1
+                                     :properties '(:read :notify)
+                                     :value #(1)
+                                     :security :encrypted)
+      (declare (ignore value-handle))
+      (let* ((lb (make-loopback server))
+             (chan (loopback-client lb)))
+        (handler-case
+            (progn (ble:att-subscribe chan cccd-handle)
+                   (is nil "subscribing on a clear link must be refused"))
+          (ble:att-error (e)
+            (is (= #x05 (ble:att-error-code e)) "insufficient authentication")))
+        (setf (ble:gatt-server-encrypted server) t)
+        (is (eq t (ble:att-subscribe chan cccd-handle))
+            "and permitted once the link is encrypted")))))
