@@ -229,6 +229,12 @@ sudo sbcl --non-interactive --load tools/live-two-radios/peripheral.lisp &
 sudo sbcl --non-interactive --load tools/live-two-radios/central.lisp
 ```
 
+`compile-check.lisp` beside them needs no hardware at all: it loads every
+definition, compiles the forms that drive the radios without running them, and
+asserts on the attribute layout the server builds. CI runs it on both
+architectures, because a harness that cannot be exercised is a harness that
+quietly stops compiling.
+
 Adjust the adapter indices and the peer address at the top of each file;
 `hciN` numbering drifts across reboots, so check with `ble:list-hci-adapters`
 rather than assuming. Each side hands its adapter back on every exit path,

@@ -55,3 +55,14 @@ jobs:
 
       - name: Test
         run: ci/test.sh
+
+      # tools/live-two-radios/ needs two USB dongles, so CI can never run it --
+      # which is exactly how a harness rots into something that no longer
+      # compiles by the time you next reach for it. This loads every
+      # definition in it, compiles the forms that drive the radios without
+      # running them, and asserts on the attribute layout the server builds,
+      # all of which is hardware-free.
+      - name: Compile-check the live harness
+        run: |
+          sbcl --non-interactive --no-userinit --no-sysinit \
+            --load tools/live-two-radios/compile-check.lisp
