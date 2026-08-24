@@ -355,7 +355,7 @@ is why reading long values takes a second round trip that usually finds
 nothing."
   (>= (length value) (1- mtu)))
 
-(defun att-read-long-value (chan handle &key (mtu *att-rx-mtu*) (max-length 512))
+(defun att-read-long-value (chan handle &key (mtu (att-mtu chan)) (max-length 512))
   "Read the whole value at HANDLE, continuing with Read Blob Requests while
 the peer keeps filling responses.
 
@@ -442,7 +442,7 @@ inherits it."
             ((att-error-p rsp) (when (>= (length rsp) 5) (aref rsp 4)))
             (t t)))))
 
-(defun att-write-long-value (chan handle value &key (mtu *att-rx-mtu*))
+(defun att-write-long-value (chan handle value &key (mtu (att-mtu chan)))
   "Write VALUE to HANDLE however long it is, via Prepare Write and Execute
 Write. Returns T, :TIMEOUT, or an ATT error code.
 
@@ -582,8 +582,29 @@ than as a protocol error."
 
 ;;; --- GATT discovery ----------------------------------------------------
 
+(defvar *att-negotiated-mtu* (make-hash-table :test #'eql)
+  "CHAN -> the MTU actually agreed with that peer.
+
+Kept apart from *ATT-RX-MTU*, which is a different number: what we *advertise*
+we can receive. They are equal only when the peer offers at least as much as
+we asked for. Sizing a PDU by the advertised value against a peer that offered
+less is how a long read silently truncates -- see ATT-MTU.")
+
+(defun att-mtu (chan)
+  "The MTU agreed with CHAN's peer, or 23 if no exchange has happened.
+
+23 is the right default rather than a pessimistic guess: it is the value ATT
+requires both ends to assume until an Exchange MTU says otherwise."
+  (gethash chan *att-negotiated-mtu* 23))
+
+(defun att-forget-mtu (chan)
+  "Drop CHAN's negotiated MTU. Called when the channel closes, so a reused fd
+number cannot inherit the previous peer's number."
+  (remhash chan *att-negotiated-mtu*))
+
 (defun att-exchange-mtu (chan &optional (client-mtu *att-rx-mtu*))
-  "Negotiate the ATT MTU. Returns the agreed MTU (>= 23).
+  "Negotiate the ATT MTU. Returns the agreed MTU (>= 23), and records it
+against CHAN so ATT-MTU can answer for it later.
 
 CLIENT-MTU defaults to what we advertise, so callers with no opinion -- which
 is most of them -- do not have to have one."
@@ -595,10 +616,18 @@ is most of them -- do not have to have one."
     ;; process-global, which is honest for a library whose transports carry
     ;; one connection at a time.
     (setf *att-rx-mtu* client-mtu)
-    (let ((rsp (att-request chan req :expect +att-exchange-mtu-rsp+)))
-      (if (and rsp (= (aref rsp 0) +att-exchange-mtu-rsp+))
-          (max 23 (min client-mtu (u16-le rsp 1)))
-          23))))
+    (let* ((rsp (att-request chan req :expect +att-exchange-mtu-rsp+))
+           (agreed (if (and rsp (= (aref rsp 0) +att-exchange-mtu-rsp+))
+                       (max 23 (min client-mtu (u16-le rsp 1)))
+                       23)))
+      ;; The agreed value is the one every later PDU must be sized by, and it
+      ;; is NOT what we advertised. Storing only the advertisement was a real
+      ;; bug: against a peer that answered 23 while we asked for 247, the
+      ;; first Read Response looked short of the 246 that would have suggested
+      ;; more to come, so ATT-READ-LONG-VALUE returned 22 octets of a 300
+      ;; octet attribute and reported no error.
+      (setf (gethash chan *att-negotiated-mtu*) agreed)
+      agreed)))
 
 ;;; --- UUIDs and characteristics ----------------------------------------
 ;;;
@@ -738,6 +767,7 @@ that may be idle; this one returns as soon as anything arrives."
 an HCI-CONN whose adapter has to be handed back to the kernel."
   (unregister-att-channel chan)
   (att-clear-notifications chan)
+  (att-forget-mtu chan)
   (cond ((att-test-channel-p chan) nil)   ; nothing to release
         ((integerp chan) (%close chan))
         (chan (hci-conn-close chan))))

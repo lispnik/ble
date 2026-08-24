@@ -1025,3 +1025,43 @@ dropped by the client, which looks like a server that did not answer."
             "a plain read yields at most MTU-1 octets")
         (is (ble:value-may-be-truncated-p value 23)
             "and the client can tell that it was truncated")))))
+
+(test a-long-read-uses-the-negotiated-mtu-not-the-advertised-one
+  "Found over the air, not here: the suite's long-read test never called
+ATT-EXCHANGE-MTU, so the client's idea of the MTU happened to match the
+server's. Against a peer that answers 23 while we ask for 247, sizing by what
+we advertised makes the first 22-octet response look short of the 246 that
+would suggest more to come -- so the read stopped, returned 22 octets of a
+300-octet attribute, and reported no error at all."
+  (let ((server (ble:make-gatt-server :mtu 23))
+        (blob (ble:make-octets 300))
+        (ble:*att-rx-mtu* 23))
+    (dotimes (i 300) (setf (aref blob i) (mod i 251)))
+    (ble:gatt-add-service server #xFFE0)
+    (let* ((h (ble:gatt-add-characteristic server :uuid #xFFE1
+                                                  :properties '(:read)
+                                                  :value blob))
+           (lb (make-loopback server))
+           (chan (loopback-client lb)))
+      ;; ask for far more than the server will agree to
+      (let ((agreed (ble:att-exchange-mtu chan 247)))
+        (is (= 23 agreed) "the peer's smaller number is what is agreed")
+        (is (= 23 (ble:att-mtu chan))
+            "and it is remembered against the channel")
+        (is (= 247 ble:*att-rx-mtu*)
+            "while the advertised value stays what we advertised"))
+      (is (equalp blob (ble:att-read-long-value chan h))
+          "the whole 300 octets, sized by the agreed MTU"))))
+
+(test the-negotiated-mtu-is-per-channel-and-dropped-on-close
+  (let* ((server (ble:make-gatt-server :mtu 23))
+         (lb (make-loopback server))
+         (chan (loopback-client lb)))
+    (ble:gatt-add-service server #xFFE0)
+    (is (= 23 (ble:att-mtu chan))
+        "23 until an exchange says otherwise, as ATT requires")
+    (ble:att-exchange-mtu chan 247)
+    (is (= 23 (ble:att-mtu chan)))
+    (ble:att-forget-mtu chan)
+    (is (= 23 (ble:att-mtu chan))
+        "and back to the default once forgotten")))

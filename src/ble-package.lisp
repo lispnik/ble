@@ -159,6 +159,8 @@
           nus-tx-handle
           nus-cccd-handle
           *att-rx-mtu*
+          att-mtu
+          att-forget-mtu
           l2cap-att-connect
           ;; LE connection over an HCI_CHANNEL_USER socket
           nus-connect-hci
@@ -175,6 +177,7 @@
           gatt-server
           gatt-server-p
           gatt-server-mtu
+          gatt-server-rx-mtu
           gatt-server-services
           gatt-add-service
           gatt-add-characteristic

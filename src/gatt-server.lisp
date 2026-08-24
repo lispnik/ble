@@ -61,6 +61,12 @@ a write, or an ATT error code to refuse it."
   "An attribute database and the MTU negotiated for the link it serves."
   (attributes (make-array 0 :adjustable t :fill-pointer t))
   (services '())
+  ;; Two different numbers. RX-MTU is what this server advertises it can
+  ;; receive, a fixed property of how it was built; MTU is what was actually
+  ;; agreed with the client that is connected, and it is the one every
+  ;; response must be sized by. Conflating them is how a server answers with
+  ;; more than the client agreed to accept.
+  (rx-mtu 23)
   (mtu 23)
   (cccd (make-hash-table :test #'eql))
   (current-service nil))
@@ -68,8 +74,11 @@ a write, or an ATT error code to refuse it."
 (defstruct gatt-service-entry start end uuid)
 
 (defun make-gatt-server (&key (mtu 23))
-  "An empty database. Add services and characteristics to it in order."
-  (%make-gatt-server :mtu mtu))
+  "An empty database. Add services and characteristics to it in order.
+
+MTU is what this server advertises it can receive. Until a client negotiates,
+GATT-SERVER-MTU stays at 23, which is what ATT requires both ends to assume."
+  (%make-gatt-server :rx-mtu mtu :mtu 23))
 
 (defun gatt-attribute-count (server)
   (length (gatt-server-attributes server)))
@@ -383,14 +392,17 @@ cares should use a request."
 
 (defun %handle-exchange-mtu (server chan pdu)
   (let ((client (u16-le pdu 1))
+        (ours (gatt-server-rx-mtu server))
         (rsp (make-octets 3)))
+    ;; Answer with this server's own advertised value, not a client-side
+    ;; global: a peripheral's receive MTU is a property of the peripheral.
     (setf (aref rsp 0) +att-exchange-mtu-rsp+)
-    (u16le-put rsp 1 *att-rx-mtu*)
+    (u16le-put rsp 1 ours)
     (att-send chan rsp)
     ;; Both ends must settle on the same number, and it is the smaller of the
     ;; two: answering with ours and then using ours would have us emit PDUs
     ;; the client is entitled to drop.
-    (setf (gatt-server-mtu server) (max 23 (min client *att-rx-mtu*)))))
+    (setf (gatt-server-mtu server) (max 23 (min client ours)))))
 
 (defun gatt-serve-pdu (server chan pdu)
   "Answer one ATT request. Returns the opcode handled, or NIL if PDU was not a

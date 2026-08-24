@@ -159,10 +159,13 @@ timeouts against a peer that was never going to speak.
 
 Long and batched access: `att-read-long-value` and `att-read-multiple`,
 `att-prepare-write` / `att-execute-write`, and `att-write-long-value` for a
-value larger than MTU−3. The read side is exercised over real radios by
-`tools/live-two-radios/`, whose server offers a 300-octet characteristic
-behind a 23-octet MTU; the long *write* is still suite-only, since neither
-consumer has a writable attribute that big.
+value larger than MTU−3. Sized by `att-mtu` — the MTU *agreed* with the peer,
+which is not the same number as `*att-rx-mtu*`, what we advertise we can
+receive. They differ whenever the peer offers less, and sizing by the wrong
+one truncates a long read silently. The read side is exercised over real
+radios by `tools/live-two-radios/`, whose server offers a 300-octet
+characteristic behind a 23-octet MTU; the long *write* is still suite-only,
+since neither consumer has a writable attribute that big.
 
 Not implemented:
 
