@@ -1652,3 +1652,94 @@ the requirement -- the notifications carry exactly what the read refused."
         (setf (ble:gatt-server-encrypted server) t)
         (is (eq t (ble:att-subscribe chan cccd-handle))
             "and permitted once the link is encrypted")))))
+
+;;; --- the published Secure Connections vectors ---------------------------
+;;;
+;;; The values from the Core spec's SMP appendix, as carried in the Linux
+;;; kernel's own self-tests. They are stored little-endian there and reversed
+;;; internally, so each is reversed here into the order these functions work
+;;; in.
+;;;
+;;; These exist because everything else failed to catch a wrong f5. The salt
+;;; below was written from memory once: it agreed with the real value for
+;;; three octets and then diverged, and the result was a MacKey and LTK that
+;;; were wrong but entirely self-consistent. Two implementations sharing the
+;;; mistake pair happily with each other, and with nothing else -- our own
+;;; two-radio test passed throughout. A phone did not.
+
+(defun le-vector (&rest bytes)
+  (reverse (ble:coerce-octets bytes)))
+
+(test f4-matches-the-published-vector
+  (is (equalp (le-vector #x2d #x87 #x74 #xa9 #xbe #xa1 #xed #xf1
+                         #x1c #xbd #xa9 #x07 #xf1 #x16 #xc9 #xf2)
+              (ble:smp-f4
+               (le-vector #xe6 #x9d #x35 #x0e #x48 #x01 #x03 #xcc
+                          #xdb #xfd #xf4 #xac #x11 #x91 #xf4 #xef
+                          #xb9 #xa5 #xf9 #xe9 #xa7 #x83 #x2c #x5e
+                          #x2c #xbe #x97 #xf2 #xd2 #x03 #xb0 #x20)
+               (le-vector #xfd #xc5 #x7f #xf4 #x49 #xdd #x4f #x6b
+                          #xfb #x7c #x9d #xf1 #xc2 #x9a #xcb #x59
+                          #x2a #xe7 #xd4 #xee #xfb #xfc #x0a #x90
+                          #x9a #xbb #xf6 #x32 #x3d #x8b #x18 #x55)
+               (le-vector #xab #xae #x2b #x71 #xec #xb2 #xff #xff
+                          #x3e #x73 #x77 #xd1 #x54 #x84 #xcb #xd5)
+               0))))
+
+(test f5-matches-the-published-vectors
+  "Both outputs, because the counter octet is the only thing separating
+them -- and a MacKey equal to the LTK would be catastrophic in a way no
+single-output check would notice."
+  (multiple-value-bind (mackey ltk)
+      (ble:smp-f5
+       (le-vector #x98 #xa6 #xbf #x73 #xf3 #x34 #x8d #x86
+                  #xf1 #x66 #xf8 #xb4 #x13 #x6b #x79 #x99
+                  #x9b #x7d #x39 #x0a #xa6 #x10 #x10 #x34
+                  #x05 #xad #xc8 #x57 #xa3 #x34 #x02 #xec)
+       (le-vector #xab #xae #x2b #x71 #xec #xb2 #xff #xff
+                  #x3e #x73 #x77 #xd1 #x54 #x84 #xcb #xd5)
+       (le-vector #xcf #xc4 #x3d #xff #xf7 #x83 #x65 #x21
+                  #x6e #x5f #xa7 #x25 #xcc #xe7 #xe8 #xa6)
+       (le-vector #xce #xbf #x37 #x37 #x12 #x56 #x00)
+       (le-vector #xc1 #xcf #x2d #x70 #x13 #xa7 #x00))
+    (is (equalp (le-vector #x20 #x6e #x63 #xce #x20 #x6a #x3f #xfd
+                           #x02 #x4a #x08 #xa1 #x76 #xf1 #x65 #x29)
+                mackey)
+        "the MacKey -- this is the one that was wrong")
+    (is (equalp (le-vector #x38 #x0a #x75 #x94 #xb5 #x22 #x05 #x98
+                           #x23 #xcd #xd7 #x69 #x11 #x79 #x86 #x69)
+                ltk))))
+
+(test f6-matches-the-published-vector
+  "Note the IO capability triple: little-endian 02 01 01 reverses to AuthReq,
+OOB flag, IO capability -- which is the order f6 wants and the wire does not."
+  (is (equalp (le-vector #x61 #x8f #x95 #xda #x09 #x0b #x6c #xd2
+                         #xc5 #xe8 #xd0 #x9c #x98 #x73 #xc4 #xe3)
+              (ble:smp-f6
+               (le-vector #x20 #x6e #x63 #xce #x20 #x6a #x3f #xfd
+                          #x02 #x4a #x08 #xa1 #x76 #xf1 #x65 #x29)
+               (le-vector #xab #xae #x2b #x71 #xec #xb2 #xff #xff
+                          #x3e #x73 #x77 #xd1 #x54 #x84 #xcb #xd5)
+               (le-vector #xcf #xc4 #x3d #xff #xf7 #x83 #x65 #x21
+                          #x6e #x5f #xa7 #x25 #xcc #xe7 #xe8 #xa6)
+               (le-vector #xc8 #x0f #x2d #x0c #xd2 #x42 #xda #x08
+                          #x54 #xbb #x53 #xb4 #x3b #x34 #xa3 #x12)
+               (le-vector #x02 #x01 #x01)
+               (le-vector #xce #xbf #x37 #x37 #x12 #x56 #x00)
+               (le-vector #xc1 #xcf #x2d #x70 #x13 #xa7 #x00)))))
+
+(test g2-matches-the-published-vector
+  (is (= (mod #x2f9ed5ba 1000000)
+         (ble:smp-g2
+          (le-vector #xe6 #x9d #x35 #x0e #x48 #x01 #x03 #xcc
+                     #xdb #xfd #xf4 #xac #x11 #x91 #xf4 #xef
+                     #xb9 #xa5 #xf9 #xe9 #xa7 #x83 #x2c #x5e
+                     #x2c #xbe #x97 #xf2 #xd2 #x03 #xb0 #x20)
+          (le-vector #xfd #xc5 #x7f #xf4 #x49 #xdd #x4f #x6b
+                     #xfb #x7c #x9d #xf1 #xc2 #x9a #xcb #x59
+                     #x2a #xe7 #xd4 #xee #xfb #xfc #x0a #x90
+                     #x9a #xbb #xf6 #x32 #x3d #x8b #x18 #x55)
+          (le-vector #xab #xae #x2b #x71 #xec #xb2 #xff #xff
+                     #x3e #x73 #x77 #xd1 #x54 #x84 #xcb #xd5)
+          (le-vector #xcf #xc4 #x3d #xff #xf7 #x83 #x65 #x21
+                     #x6e #x5f #xa7 #x25 #xcc #xe7 #xe8 #xa6)))))

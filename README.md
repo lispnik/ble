@@ -190,21 +190,26 @@ uses ironclad's P-256 rather than the controller. AES-CMAC is ironclad's too;
 the controller's AES-128 was verified correct against the FIPS-197 vector, but
 having both in one place is worth more than saving the round trips.
 
-**What is verified, and what is not.** RFC 4493 vectors cover AES-CMAC, and
-`smp-dhkey` is checked for the property that makes ECDH work — both sides
-reaching the same secret. Over two radios, an initiator and a responder in
-separate processes derive a byte-identical LTK and the controllers report the
-link encrypted — with a *different* LTK each run, and with passkey entry a
-deliberately mismatched passkey is rejected rather than quietly falling back
-to Just Works, each end naming the same cause from its own side: *the peer
-rejected us: confirm value failed* against *we rejected the peer: confirm
-value failed*. But **both ends are this code**, so agreement demonstrates
-internal consistency rather than conformance: a systematically wrong `f5`
-would agree with itself. Interop against an independent stack is the proof
-that is missing. It was attempted against BlueZ three ways and none completed
-— the Pi's built-in radio fails to scan with an I/O error, and both
-`bluetoothctl` and `btmgmt` runs died without connecting. **Treat spec
-conformance as unproven until a third-party peer pairs with this.**
+**Verified against an independent implementation.** f4, f5, f6 and g2 all
+match the Core spec's published Secure Connections vectors, and ironclad's
+P-256 matches a from-scratch implementation of the curve arithmetic. Over two
+radios an initiator and a responder derive a byte-identical LTK and the
+controllers report the link encrypted, with a different LTK each run; with
+passkey entry a mismatched passkey is rejected rather than falling back to
+Just Works.
+
+**And against a phone**, which matters more than all of it. An iPhone
+completes the exchange with this library and the check values agree exactly.
+That is the only test that ever found anything: f5's salt was written here
+from memory, agreed with the real value for three octets, and then diverged.
+A wrong salt yields a MacKey and LTK that are wrong but perfectly
+self-consistent — so two implementations sharing the mistake pair happily with
+each other and with nothing else. The two-radio test passed throughout,
+including every passkey run. Only a peer that did not share the error could
+show it, and one did.
+
+The published vectors are now in the suite. A constant that cannot be reasoned
+about has to be checked against a source, not recalled.
 
 ## Streams: connection-oriented channels
 

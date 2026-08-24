@@ -36,9 +36,16 @@ numeric comparison, and a passkey bit otherwise."
   (aes-cmac x (cat u v (vector z))))
 
 (defparameter +f5-salt+
-  (coerce-octets #(#x6C #x88 #x83 #x53 #x4C #x0D #xC6 #xE6
-                   #x59 #xD1 #xBB #x3E #x9F #x1C #xA4 #xCF))
-  "The fixed salt f5 uses to turn the DHKey into a key-generation key.")
+  (coerce-octets #(#x6C #x88 #x83 #x91 #xAA #xF5 #xA5 #x38
+                   #x60 #x37 #x0B #xDB #x5A #x60 #x83 #xBE))
+  "The fixed salt f5 uses to turn the DHKey into a key-generation key.
+
+Checked against the published vectors, and not from memory: an earlier value
+here agreed with the real one for three octets and then diverged, which is
+precisely the kind of constant that cannot be reasoned about. It produced a
+MacKey and LTK that were wrong but perfectly self-consistent, so two
+implementations sharing the mistake pair happily with each other and with
+nothing else.")
 
 (defparameter +f5-key-id+ (coerce-octets #(#x62 #x74 #x6C #x65))  ; "btle"
   "Key ID, literally the ASCII for `btle'.")
