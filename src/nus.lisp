@@ -254,7 +254,11 @@ behaviour is visible at all."
 (defun %test-channel-send (chan pdu)
   (let ((pdu (coerce-octets pdu)))
     (push pdu (att-test-channel-sent chan))
-    (let ((reply (funcall (att-test-channel-responder chan) pdu)))
+    ;; A channel with no responder is a legitimate configuration, not an
+    ;; oversight: it is what you want when the point of the test is traffic
+    ;; the peer sends unprompted, and the client's only job is to receive it.
+    (let ((reply (let ((r (att-test-channel-responder chan)))
+                   (when r (funcall r pdu)))))
       (dolist (r (cond ((null reply) '())
                        ((listp reply) reply)
                        (t (list reply))))
@@ -301,8 +305,11 @@ device that accepted it and did nothing."
     (u16le-put pdu 1 handle)
     (replace pdu value :start1 3)
     (let ((rsp (att-request chan pdu :expect +att-write-rsp+)))
-      (cond ((null rsp) :timeout)
-            ((att-error-p rsp) (when (>= (length rsp) 5) (aref rsp 4)))
+      (cond ((null rsp) (%att-fail :timeout :operation "Write Request"))
+            ((att-error-p rsp)
+             (when (>= (length rsp) 5)
+               (%att-fail :error :code (aref rsp 4) :opcode +att-write-req+
+                                 :handle handle)))
             (t t)))))
 
 ;;; --- reading --------------------------------------------------------
@@ -331,8 +338,11 @@ The value may be TRUNCATED: a Read Response carries at most MTU-1 octets, and
 the peer does not say whether more exists. See ATT-READ-LONG-VALUE, and
 VALUE-MAY-BE-TRUNCATED-P for how to tell."
   (let ((rsp (att-request chan (%read-req-pdu handle) :expect +att-read-rsp+)))
-    (cond ((null rsp) (values nil :timeout))
-          ((att-error-p rsp) (values nil (when (>= (length rsp) 5) (aref rsp 4))))
+    (cond ((null rsp) (values nil (%att-fail :timeout :operation "Read Request")))
+          ((att-error-p rsp)
+           (values nil (when (>= (length rsp) 5)
+                         (%att-fail :error :code (aref rsp 4)
+                                           :opcode +att-read-req+ :handle handle))))
           (t (values (subseq rsp 1) nil)))))
 
 (defun value-may-be-truncated-p (value mtu)
@@ -465,6 +475,68 @@ with ERROR :NOT-FOUND when no characteristic matches."
           (long (att-read-long-value chan (gatt-char-handle c) :mtu mtu))
           (t (att-read-value chan (gatt-char-handle c))))))
 
+(defvar *att-notifications* (make-hash-table :test #'eql)
+  "CHAN -> a FIFO of (HANDLE . VALUE) notifications reassembled but not yet
+asked for. Keyed by EQL, which covers both channel representations: an integer
+fd for the kernel L2CAP transport, and an HCI-CONN struct for the other.")
+
+(defvar *att-notification-queue-limit* 256
+  "How many unclaimed notifications one channel may hold before the oldest are
+dropped. A bound is necessary: a peer notifying at 10 Hz that nobody reads
+would otherwise grow this without limit for as long as the link is up.")
+
+(defun %att-enqueue-notification (chan handle value)
+  "Remember a notification nobody has asked for yet."
+  (let* ((q (gethash chan *att-notifications*))
+         (q (nconc q (list (cons handle value)))))
+    ;; Drop from the front: the freshest reading of a sensor is the one worth
+    ;; keeping, and a caller this far behind has already lost the thread.
+    (loop while (> (length q) *att-notification-queue-limit*)
+          do (pop q))
+    (setf (gethash chan *att-notifications*) q)))
+
+(defun %att-note-server-pdu (chan pdu)
+  "If PDU is server-initiated traffic, deal with it and return T.
+
+Queueing rather than discarding is the whole point. Notifications arrive
+whenever the peer feels like it, including in the middle of a read, a write,
+or service discovery -- and every one of those paths used to drop them on the
+floor. On a device that notifies continuously, a subscriber could lose an
+arbitrary number of readings to an unrelated request running concurrently, and
+nothing anywhere reported it."
+  (when (and pdu (vectorp pdu) (>= (length pdu) 3))
+    (let ((op (aref pdu 0)))
+      (cond ((= op +att-handle-value-ntf+)
+             (%att-enqueue-notification chan (u16-le pdu 1) (subseq pdu 3))
+             t)
+            ((= op +att-handle-value-ind+)
+             ;; Confirm at the point of receipt, not when the value is finally
+             ;; claimed: the peer may send no further indication until it is
+             ;; answered, so deferring the confirmation would stall the link
+             ;; for as long as the value sat in the queue.
+             (att-confirm-indication chan)
+             (%att-enqueue-notification chan (u16-le pdu 1) (subseq pdu 3))
+             t)))))
+
+(defun %att-take-notification (chan &optional handle)
+  "Pop the oldest queued notification, for HANDLE if given. (VALUES VALUE HANDLE)
+or NIL."
+  (let* ((q (gethash chan *att-notifications*))
+         (hit (if handle (find handle q :key #'car) (first q))))
+    (when hit
+      (setf (gethash chan *att-notifications*) (remove hit q :count 1))
+      (values (cdr hit) (car hit)))))
+
+(defun att-pending-notifications (chan &optional handle)
+  "How many queued notifications CHAN holds, for HANDLE if given."
+  (let ((q (gethash chan *att-notifications*)))
+    (if handle (count handle q :key #'car) (length q))))
+
+(defun att-clear-notifications (chan)
+  "Forget CHAN's queued notifications. Called when the channel closes so a
+reused fd number cannot inherit the previous channel's backlog."
+  (remhash chan *att-notifications*))
+
 (defun att-request (chan pdu &key expect)
   "Send PDU and return the response PDU matching EXPECT (or an error
 response). Server-initiated traffic that arrives meanwhile is handled and
@@ -476,12 +548,12 @@ NIL, the first non-skipped PDU is returned."
   (loop for rsp = (att-recv chan)
         while (and rsp (vectorp rsp))
         for op = (aref rsp 0)
-        do (cond ((= op +att-handle-value-ntf+) nil)        ; stray notification
-                 ((= op +att-handle-value-ind+)             ; stray indication
-                  ;; Skipping without confirming would wedge the peer for
-                  ;; every later exchange, so this is not optional here
-                  ;; either -- discovery is exactly when strays arrive.
-                  (att-confirm-indication chan))
+        do (cond ((or (= op +att-handle-value-ntf+)
+                      (= op +att-handle-value-ind+))
+                  ;; Server-initiated traffic, queued rather than dropped, and
+                  ;; an indication confirmed on the spot. Discovery is exactly
+                  ;; when strays arrive.
+                  (%att-note-server-pdu chan rsp))
                  ((= op +att-exchange-mtu-req+)             ; peer-initiated MTU: answer
                   (let ((r (make-octets 3)))
                     (setf (aref r 0) +att-exchange-mtu-rsp+)
@@ -598,35 +670,74 @@ single indication, which is worse than not offering it."
                                       (let ((v (make-octets 2)))
                                         (u16le-put v 0 (if indications #x0002 #x0001))
                                         v))))
+    ;; Always signals, in both styles: a CCCD write that fails means no
+    ;; notification will ever arrive, and a caller that carried on would wait
+    ;; out its timeouts against a peer that was never going to speak.
     (unless (eq rsp-or-code t)
-      (error "failed to subscribe at handle 0x~4,'0X (~A)"
-             cccd-handle
-             (if (integerp rsp-or-code)
-                 (format nil "ATT error 0x~2,'0X" rsp-or-code)
-                 rsp-or-code)))
+      (if (integerp rsp-or-code)
+          (error 'att-error :code rsp-or-code :opcode +att-write-req+
+                            :handle cccd-handle)
+          (error 'att-timeout :operation "CCCD write")))
     t))
+
+(defun %att-collect-notification (chan handle timeout-ms)
+  "Wait up to TIMEOUT-MS for a queued or freshly-arrived notification on
+HANDLE, or on any handle when HANDLE is NIL. (VALUES VALUE HANDLE) or NIL.
+
+The deadline is wall-clock across the whole call rather than per read. A
+channel carrying two subscriptions delivers PDUs the caller did not ask for,
+and restarting the timeout on each of those would let this block for
+arbitrarily longer than it was told to."
+  (multiple-value-bind (value h) (%att-take-notification chan handle)
+    (when value (return-from %att-collect-notification (values value h))))
+  (let ((deadline (+ (get-internal-real-time)
+                     (round (* timeout-ms internal-time-units-per-second) 1000))))
+    (loop
+      (let ((remaining (- deadline (get-internal-real-time))))
+        (when (<= remaining 0) (return nil))
+        (let ((pdu (att-recv chan (max 1 (round (* remaining 1000)
+                                                internal-time-units-per-second)))))
+          (cond
+            ((eq pdu :disconnected)
+             (return (%att-fail :disconnected)))
+            ((%att-note-server-pdu chan pdu)
+             (multiple-value-bind (value h) (%att-take-notification chan handle)
+               (when value (return (values value h)))))
+            ;; Anything else -- a late response to a request nobody is waiting
+            ;; for any more -- is not ours to keep. Keep waiting.
+            ((null pdu) (return nil))))))))
 
 (defun att-next-notification (chan handle &optional (timeout-ms 5000))
   "Block for the next Handle Value Notification OR Indication on HANDLE and
-return its value octets. NIL on timeout, on disconnect, or on any other PDU.
+return its value octets. NIL on timeout.
 
-An indication is confirmed before returning. The two are deliberately not
+Traffic on *other* handles is queued, not discarded, so a peer with more than
+one notifying characteristic can be subscribed to all of them and read with
+one call per handle. Until it was, whichever handle you were not asking for at
+that instant lost its notification silently -- which made a second
+subscription look like a peer that had stopped sending.
+
+An indication is confirmed on receipt. The two are deliberately not
 distinguished in the return value: which one a device uses is its choice, the
 payload means the same either way, and a caller made to handle both would end
 up writing this function again."
-  (let ((pdu (att-recv chan timeout-ms)))
-    (when (and pdu (vectorp pdu) (>= (length pdu) 3)
-               (= (u16-le pdu 1) handle))
-      (let ((op (aref pdu 0)))
-        (cond ((= op +att-handle-value-ntf+) (subseq pdu 3))
-              ((= op +att-handle-value-ind+)
-               (att-confirm-indication chan)
-               (subseq pdu 3)))))))
+  (values (%att-collect-notification chan handle timeout-ms)))
+
+(defun att-next-notification-any (chan &optional (timeout-ms 5000))
+  "Like ATT-NEXT-NOTIFICATION but for a peer notifying on several handles:
+returns (VALUES VALUE HANDLE) for whichever arrives first, oldest queued
+first. NIL on timeout.
+
+This is the call to reach for with multiple subscriptions. Polling each handle
+in turn with ATT-NEXT-NOTIFICATION works, but it spends its timeout on handles
+that may be idle; this one returns as soon as anything arrives."
+  (%att-collect-notification chan nil timeout-ms))
 
 (defun att-channel-close (chan)
   "Close an ATT channel, whichever transport it is: a kernel L2CAP socket, or
 an HCI-CONN whose adapter has to be handed back to the kernel."
   (unregister-att-channel chan)
+  (att-clear-notifications chan)
   (cond ((integerp chan) (%close chan))
         (chan (hci-conn-close chan))))
 

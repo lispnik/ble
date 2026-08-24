@@ -11,7 +11,24 @@
 ;;; interns them; EXPORT then makes them external. This file must load before
 ;;; the files that define them.
 
-(export '(;; Errors and low-level waiting
+(export '(;; Conditions (src/att-conditions.lisp; the BLE-ERROR root is
+          ;; ble/core's, in src/conditions.lisp)
+          att-error
+          att-error-code
+          att-error-opcode
+          att-error-handle
+          att-error-name
+          att-timeout
+          att-timeout-operation
+          att-timeout-ms
+          peer-disconnected
+          peer-disconnected-handle
+          gatt-not-found
+          gatt-not-found-what
+          gatt-not-found-uuid
+          *att-signal-errors*
+          with-ble-conditions
+          ;; Errors and low-level waiting
           syscall-error
           syscall-error-label
           syscall-error-code
@@ -90,6 +107,7 @@
           make-att-test-channel
           att-test-channel-sent
           att-test-channel-sent-pdus
+          att-test-channel-inbox
           att-send
           att-recv
           att-request
@@ -121,6 +139,10 @@
           att-write-command
           att-subscribe
           att-next-notification
+          att-next-notification-any
+          att-pending-notifications
+          att-clear-notifications
+          *att-notification-queue-limit*
           att-confirm-indication
           att-channel-close
           ;; Nordic UART Service GATT client

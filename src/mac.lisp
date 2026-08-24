@@ -14,7 +14,7 @@
 MAC string \"AA:BB:CC:DD:EE:FF\" (MSB first). Inverse of PARSE-MAC."
   (format nil "~{~2,'0X~^:~}" (reverse (coerce bytes 'list))))
 
-(define-condition invalid-mac (error)
+(define-condition invalid-mac (ble-error)
   ((string :initarg :string :reader invalid-mac-string))
   (:report (lambda (c s)
              (format s "invalid MAC ~S: expected six hex octets separated by ':' or '-'"

@@ -22,9 +22,10 @@
   :depends-on  ()
   :components ((:module "src"
                 :components ((:file "package")
-                             (:file "octets" :depends-on ("package"))
-                             (:file "ad"     :depends-on ("octets"))
-                             (:file "mac"    :depends-on ("package"))))))
+                             (:file "conditions" :depends-on ("package"))
+                             (:file "octets"     :depends-on ("package"))
+                             (:file "ad"         :depends-on ("octets"))
+                             (:file "mac"        :depends-on ("conditions"))))))
 
 (asdf:defsystem #:ble
   :description "Generic Bluetooth Low Energy over raw BlueZ sockets (Linux only)."
@@ -34,9 +35,10 @@
   :components ((:module "src"
                 :components ((:file "ble-package")
                              (:file "ffi"        :depends-on ("ble-package"))
+                             (:file "att-conditions" :depends-on ("ble-package"))
                              (:file "hci"        :depends-on ("ffi"))
                              (:file "advertiser" :depends-on ("hci"))
-                             (:file "nus"        :depends-on ("hci"))
+                             (:file "nus"        :depends-on ("hci" "att-conditions"))
                              (:file "hci-conn"   :depends-on ("nus"))
                              (:file "teardown"   :depends-on ("hci-conn"))))))
 

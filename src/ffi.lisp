@@ -51,7 +51,7 @@ the way to lift this restriction properly."
                  flow, not only for diagnostics; see the docstring."
                 (lisp-implementation-type)))
 
-(define-condition syscall-error (error)
+(define-condition syscall-error (ble-error)
   ((label :initarg :label :reader syscall-error-label)
    (code  :initarg :code  :reader syscall-error-code))
   (:report (lambda (c s)

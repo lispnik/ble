@@ -577,3 +577,133 @@ read. Taking one frame and clearing the buffer threw the other away."
   (multiple-value-bind (pending remainder) (drained (hex->octets "040000"))
     (is (null pending))
     (is (= 3 (length remainder)) "kept until the rest of the header arrives")))
+
+;;; --- notification dispatch across several handles -----------------------
+;;;
+;;; The bug these pin down: ATT-NEXT-NOTIFICATION filtered on one handle and
+;;; dropped every PDU that did not match, and ATT-REQUEST dropped stray
+;;; notifications outright. Between them, a peer notifying on two
+;;; characteristics lost whichever one the caller was not asking for at that
+;;; instant -- silently, and indistinguishably from a peer gone quiet.
+
+(defun ntf (handle payload-hex)
+  "A Handle Value Notification PDU."
+  (let* ((payload (hex->octets payload-hex))
+         (pdu (ble:make-octets (+ 3 (length payload)))))
+    (setf (aref pdu 0) #x1B)
+    (ble:u16le-put pdu 1 handle)
+    (replace pdu payload :start1 3)
+    pdu))
+
+(defun inbox-channel (&rest pdus)
+  "A channel that simply hands back PDUS, in order, with no responder."
+  (let ((chan (ble:make-att-test-channel)))
+    (setf (ble:att-test-channel-inbox chan) (mapcar #'ble:coerce-octets pdus))
+    chan))
+
+(test a-notification-on-another-handle-is-kept-not-dropped
+  (let ((chan (inbox-channel (ntf #x0020 "BB") (ntf #x0010 "AA"))))
+    (ble:att-clear-notifications chan)
+    (is (equalp (hex->octets "AA") (ble:att-next-notification chan #x0010 50))
+        "the handle we asked for must arrive, past the one we did not")
+    (is (= 1 (ble:att-pending-notifications chan #x0020))
+        "and the other handle's notification must still be there")
+    (is (equalp (hex->octets "BB") (ble:att-next-notification chan #x0020 50))
+        "claimable afterwards, which is the whole point")))
+
+(test next-notification-any-reports-which-handle-it-came-from
+  (let ((chan (inbox-channel (ntf #x0020 "BB") (ntf #x0010 "AA"))))
+    (ble:att-clear-notifications chan)
+    (multiple-value-bind (value handle) (ble:att-next-notification-any chan 50)
+      (is (equalp (hex->octets "BB") value) "oldest first")
+      (is (= #x0020 handle) "and the caller is told which characteristic"))
+    (multiple-value-bind (value handle) (ble:att-next-notification-any chan 50)
+      (is (equalp (hex->octets "AA") value))
+      (is (= #x0010 handle)))))
+
+(test a-request-does-not-eat-notifications-that-arrive-during-it
+  "A read that runs while the peer is notifying must not cost the subscriber
+its readings -- this is the common case on a device that notifies at 1 Hz."
+  (let ((chan (ble:make-att-test-channel
+               :responder (lambda (pdu)
+                            (when (= (aref pdu 0) #x0A)
+                              ;; a stray notification arrives first, then the
+                              ;; read response we are actually waiting for
+                              (list (ntf #x0010 "AA")
+                                    (hex->octets "0B" "DEAD")))))))
+    (ble:att-clear-notifications chan)
+    (is (equalp (hex->octets "DEAD") (ble:att-read-value chan #x000C))
+        "the read still returns its own answer")
+    (is (= 1 (ble:att-pending-notifications chan #x0010))
+        "and the notification it stepped over was kept")))
+
+(test an-indication-is-confirmed-when-received-not-when-claimed
+  "The peer may send no further indication until confirmed, so deferring the
+confirmation until someone claims the value would stall the link."
+  (let ((chan (inbox-channel (let ((p (ntf #x0010 "AA")))
+                               (setf (aref p 0) #x1D) ; indication
+                               p))))
+    (ble:att-clear-notifications chan)
+    (is (equalp (hex->octets "AA") (ble:att-next-notification chan #x0010 50)))
+    (is (find #x1E (ble:att-test-channel-sent-pdus chan)
+              :key (lambda (p) (aref p 0)))
+        "a Handle Value Confirmation must have gone back")))
+
+(test the-notification-queue-is-bounded
+  "A peer notifying faster than anyone reads must not grow this without end."
+  (let ((chan (ble:make-att-test-channel))
+        (ble:*att-notification-queue-limit* 4))
+    (ble:att-clear-notifications chan)
+    (setf (ble:att-test-channel-inbox chan)
+          (loop for i below 10 collect (ntf #x0010 "AA")))
+    ;; drain what will fit; the excess is dropped from the front
+    (loop repeat 10 while (ble:att-next-notification chan #x0099 1))
+    (is (<= (ble:att-pending-notifications chan) 4)
+        "the bound must hold")))
+
+(test closing-a-channel-forgets-its-queue
+  "fd numbers get reused; a new channel must not inherit the old one's backlog."
+  (let ((chan (inbox-channel (ntf #x0010 "AA"))))
+    (ble:att-clear-notifications chan)
+    (ble:att-next-notification chan #x0099 1)   ; queues it, claims nothing
+    (is (= 1 (ble:att-pending-notifications chan)))
+    (ble:att-clear-notifications chan)
+    (is (zerop (ble:att-pending-notifications chan)))))
+
+;;; --- conditions ---------------------------------------------------------
+
+(test sentinels-are-still-the-default
+  "Turning every timeout into a stack unwind would make this unpleasant to
+poll with, so the old return values stand unless a caller opts in."
+  (let ((chan (scripted (cons #x12 (lambda (pdu) (declare (ignore pdu))
+                                     (hex->octets "01" "12" "0C00" "03"))))))
+    (is (= 3 (ble:att-write-value chan #x000C (hex->octets "AA")))
+        "an ATT error code comes back as an integer, as it always has")))
+
+(test with-ble-conditions-signals-a-typed-att-error
+  (let ((chan (scripted (cons #x12 (lambda (pdu) (declare (ignore pdu))
+                                     (hex->octets "01" "12" "0C00" "03"))))))
+    (handler-case (ble:with-ble-conditions
+                    (ble:att-write-value chan #x000C (hex->octets "AA"))
+                    (is nil "should have signalled"))
+      (ble:att-error (e)
+        (is (= 3 (ble:att-error-code e)) "write not permitted")
+        (is (= #x000C (ble:att-error-handle e)) "and it names the handle")
+        (is (string= "write not permitted" (ble:att-error-name 3)))))))
+
+(test every-condition-descends-from-ble-error
+  "The point of the hierarchy: one handler for anything Bluetooth-related."
+  (dolist (type '(ble:att-error ble:att-timeout ble:peer-disconnected
+                  ble:gatt-not-found ble:syscall-error ble:invalid-mac))
+    (is (subtypep type 'ble:ble-error)
+        (format nil "~A must inherit BLE-ERROR" type))))
+
+(test a-failed-subscribe-always-signals
+  "No sentinel here in either style: a CCCD write that fails means no
+notification will ever arrive, and a caller carrying on would wait out its
+timeouts against a peer that was never going to speak."
+  (let ((chan (scripted (cons #x12 (lambda (pdu) (declare (ignore pdu))
+                                     (hex->octets "01" "12" "0D00" "02"))))))
+    (handler-case (progn (ble:att-subscribe chan #x000D)
+                         (is nil "should have signalled"))
+      (ble:att-error (e) (is (= 2 (ble:att-error-code e)))))))

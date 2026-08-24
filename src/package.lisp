@@ -28,6 +28,8 @@
 (defpackage #:ble
   (:use #:cl)
   (:export
+   ;; The root of every condition this library signals (src/conditions.lisp)
+   #:ble-error
    ;; Octet vectors and little-endian integers (src/octets.lisp)
    #:octet
    #:octets
