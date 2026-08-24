@@ -210,6 +210,15 @@
           with-nus-hci
           with-extended-scan
           with-advertising
+          ;; Established-connection control (src/conn-params.lisp)
+          hci-connection-update
+          hci-read-remote-features
+          hci-read-remote-version
+          hci-read-rssi
+          ms-to-interval-units
+          interval-units-to-ms
+          ms-to-timeout-units
+          timeout-units-to-ms
           ;; Giving the adapter back (src/teardown.lisp)
           *open-att-channels*
           register-att-channel

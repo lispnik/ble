@@ -128,6 +128,25 @@ wants; `on-write` returns an ATT error code to refuse a write. `gatt-notify`
 declines to send unless the client has actually subscribed — sending anyway is
 a protocol violation, and it reaches the client as traffic it never asked for.
 
+## The established connection
+
+`hci-connection-update`, `hci-read-rssi`, `hci-read-remote-features` and
+`hci-read-remote-version` drive the controller directly, so they need an
+`hci-conn` — with the kernel L2CAP path we do not own the controller and
+cannot issue commands on it.
+
+The connection interval is the one knob that trades latency against power on a
+live link. A peripheral asks for what it wants when it advertises, but the
+central sets it, so this is how you shorten a link that answers too slowly or
+lengthen one draining a battery. Intervals are carried in 1.25 ms units and
+supervision timeouts in 10 ms ones; these take milliseconds and convert, so
+the units live in one place rather than at every call site.
+
+`hci-connection-update` returns the parameters **in force**, which need not be
+the ones asked for — the peer may answer anywhere inside the range. Using the
+requested numbers afterwards is how a link ends up being driven at an interval
+it is not running at.
+
 ## Resource-safe wrappers
 
 `with-hci-socket`, `with-hci-user-socket`, `with-att-channel`, `with-nus`,
@@ -183,8 +202,8 @@ Not implemented:
 
 - **SMP** — no pairing, bonding or encryption, so this cannot talk to a peer
   that requires a bonded link. The largest remaining gap by a distance.
-- **Connection parameter update**, and the LE privacy features (resolving
-  list, RPA) and controller filter-accept-list.
+- **LE privacy** (resolving list, RPA) and the controller filter-accept-list.
+- **Read Multiple Variable Length** (0x20, from 5.2), refused as unsupported.
 - **L2CAP connection-oriented channels**, so no high-throughput transfers.
 - **Signed Writes.** Verifying one needs a CSRK, which is distributed by
   bonding, which needs SMP. Until that exists the only honest thing to do with

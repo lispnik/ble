@@ -21,7 +21,15 @@
 
 ;;; Little-endian integer readers -----------------------------------------
 
-(declaim (inline u16-le s16-le u32-le s32-le))
+(declaim (inline s8 u16-le s16-le u32-le s32-le))
+
+(defun s8 (buf i)
+  "The signed octet at index I.
+
+Worth having rather than open-coding: RSSI and transmit power are signed, and
+reading one unsigned turns -60 dBm into a cheerful 196."
+  (let ((raw (aref buf i)))
+    (if (> raw 127) (- raw 256) raw)))
 
 (defun u16-le (vec offset)
   (logior (aref vec offset)

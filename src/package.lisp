@@ -35,6 +35,7 @@
    #:octets
    #:make-octets
    #:coerce-octets
+   #:s8
    #:u16-le
    #:s16-le
    #:u32-le

@@ -106,3 +106,12 @@ mutate and nobody else holds a reference to it."
   (signals error (ble:parse-mac "11:22:33:44:55"))       ; too few
   (signals error (ble:parse-mac "11:22:33:44:55:66:77")) ; too many
   (signals error (ble:parse-mac "zz:22:33:44:55:66")))   ; non-hex
+
+(test signed-octets-read-as-signed
+  "RSSI and transmit power are signed. Reading one unsigned is the difference
+between -60 dBm and a cheerful 196."
+  (is (= 0 (ble:s8 #(0) 0)))
+  (is (= 127 (ble:s8 #(127) 0)) "the top of the positive range")
+  (is (= -128 (ble:s8 #(128) 0)) "and the bottom of the negative one")
+  (is (= -1 (ble:s8 #(255) 0)))
+  (is (= -60 (ble:s8 #(0 #xC4) 1)) "a plausible connection RSSI"))

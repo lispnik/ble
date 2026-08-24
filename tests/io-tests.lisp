@@ -1192,3 +1192,26 @@ fragment, so it has to be the value, not just an acknowledgement."
       ;; handle 3 is the read-only manufacturer string
       (is (= #x03 (nth-value 1 (ble:att-prepare-write chan 3 0 #(1))))
           "write-not-permitted, at prepare time rather than at execute"))))
+
+;;; --- connection parameter units -----------------------------------------
+;;;
+;;; The controller carries intervals in 1.25 ms units and supervision timeouts
+;;; in 10 ms ones. Mixing them up produces a link that works but runs an order
+;;; of magnitude away from what was asked for, which is invisible until you
+;;; measure it -- so the conversions get their own checks.
+
+(test connection-interval-units-round-trip
+  (is (= 24 (ble:ms-to-interval-units 30)) "30 ms is 24 units, not 30")
+  (is (= 30 (ble:interval-units-to-ms 24)) "and back again")
+  (is (= 6 (ble:ms-to-interval-units 1))
+      "clamped up to the 7.5 ms minimum the spec allows")
+  (is (= #x0C80 (ble:ms-to-interval-units 100000))
+      "and down to the maximum")
+  (is (= 40 (ble:ms-to-interval-units 50))))
+
+(test supervision-timeout-units-round-trip
+  (is (= 400 (ble:ms-to-timeout-units 4000)) "4 s is 400 units of 10 ms")
+  (is (= 4000 (ble:timeout-units-to-ms 400)))
+  (is (= 5000 (ble:timeout-units-to-ms 500))
+      "500 units is five seconds, which is the number that trips people up")
+  (is (= 10 (ble:ms-to-timeout-units 1)) "clamped to the minimum"))

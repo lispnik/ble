@@ -158,6 +158,49 @@
             (check (and (plusp from-a) (plusp from-b))
                    "att-next-notification-any delivers from both handles")))
 
+        ;; --- the established connection itself -----------------------------
+        ;; Only testable against a real controller and a real peer: there is
+        ;; no answer to "what interval is this link running at" without a link.
+        (let ((rssi (ble:hci-read-rssi chan)))
+          (format t "~&[central] connection RSSI: ~A dBm~%" rssi)
+          (check (and (integerp rssi) (< -128 rssi 20))
+                 "RSSI reads back as a plausible signed dBm value"))
+
+        (multiple-value-bind (version manufacturer subversion)
+            (ble:hci-read-remote-version chan)
+          (format t "~&[central] peer controller: version 0x~2,'0X, ~
+                     manufacturer ~A, subversion 0x~4,'0X~%"
+                  (if (integerp version) version 0) manufacturer
+                  (or subversion 0))
+          (check (integerp version) "the peer reports a core spec version")
+          (check (and (integerp version) (>= version #x06))
+                 "which is at least 4.0, since this is an LE link"))
+
+        (let ((features (ble:hci-read-remote-features chan)))
+          (format t "~&[central] peer LE features: ~A~%" features)
+          (check (and (vectorp features) (= 8 (length features)))
+                 "the LE feature bitmap is eight octets")
+          (check (and (vectorp features) (logbitp 0 (aref features 0)))
+                 "with LE Encryption set, which every LE controller has"))
+
+        ;; Renegotiate the link, and believe the numbers that come back rather
+        ;; than the ones asked for -- the peer may answer anywhere in range.
+        (multiple-value-bind (interval latency timeout)
+            (ble:hci-connection-update chan :min-interval-ms 100
+                                            :max-interval-ms 150
+                                            :supervision-timeout-ms 5000)
+          (format t "~&[central] connection update -> interval ~A ms, ~
+                     latency ~A, timeout ~A ms~%" interval latency timeout)
+          (check (numberp interval) "the update completes")
+          (check (and (numberp interval) (<= 100 interval 150))
+                 "at an interval inside the range requested")
+          (check (and (numberp timeout) (= 5000 timeout))
+                 "and the supervision timeout asked for"))
+
+        ;; The link still works afterwards, which is the part that matters.
+        (check (equalp #(9 9) (ble:att-read-value chan (ble:gatt-char-handle ffe1)))
+               "and the connection still serves reads at the new parameters")
+
         ;; --- conditions, against a live refusal ---------------------------
         (let ((r (ble:att-write-value chan #x00FF #(1))))
           (format t "~&[central] default-style write to a bad handle: ~S~%" r)
