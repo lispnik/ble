@@ -198,8 +198,9 @@ controllers report the link encrypted, with a different LTK each run; with
 passkey entry a mismatched passkey is rejected rather than falling back to
 Just Works.
 
-**And against a phone**, which matters more than all of it. An iPhone
-completes the exchange with this library and the check values agree exactly.
+**And against a phone**, which matters more than all of it. An iPhone pairs
+with this library and encrypts the link: the check values agree exactly, and
+the controllers report encryption enabled with the key both ends derived.
 That is the only test that ever found anything: f5's salt was written here
 from memory, agreed with the real value for three octets, and then diverged.
 A wrong salt yields a MacKey and LTK that are wrong but perfectly

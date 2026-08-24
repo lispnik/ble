@@ -55,6 +55,9 @@ no visible reason."
   (let ((deadline (+ (get-internal-real-time)
                      (round (* timeout-ms internal-time-units-per-second) 1000))))
     (loop
+      ;; Something else may already have pulled it off the socket.
+      (let ((queued (hci-take-event conn :event event :subevent subevent)))
+        (when queued (return queued)))
       (let ((remaining (- deadline (get-internal-real-time))))
         (when (<= remaining 0) (return nil))
         (let ((r (hci-pump conn (max 1 (round (* remaining 1000)
@@ -98,6 +101,9 @@ running at."
     (u16le-put params 8 (ms-to-timeout-units supervision-timeout-ms))
     (u16le-put params 10 min-ce)
     (u16le-put params 12 max-ce)
+    ;; Anything of this type still queued belongs to an earlier
+    ;; exchange and would be claimed as this command's answer.
+    (hci-drop-events conn :event +hci-le-meta-evt+ :subevent +le-conn-update-complete-evt+)
     (send-hci-command sock +ogf-le+ +ocf-le-connection-update+ params)
     ;; AWAIT NIL issues the command and returns. The completion event arrives
     ;; whenever the peer gets round to it, and a caller that is inside its own
@@ -127,6 +133,9 @@ use a feature the peer lacks fails in ways that look like interference."
         (h (%conn-handle conn handle))
         (params (make-octets 2)))
     (u16le-put params 0 h)
+    ;; Anything of this type still queued belongs to an earlier
+    ;; exchange and would be claimed as this command's answer.
+    (hci-drop-events conn :event +hci-le-meta-evt+ :subevent +le-read-remote-features-evt+)
     (send-hci-command sock +ogf-le+ +ocf-le-read-remote-features+ params)
     (let ((evt (%await-hci-event conn :event +hci-le-meta-evt+
                                       :subevent +le-read-remote-features-evt+
@@ -148,6 +157,9 @@ identifier."
         (h (%conn-handle conn handle))
         (params (make-octets 2)))
     (u16le-put params 0 h)
+    ;; Anything of this type still queued belongs to an earlier
+    ;; exchange and would be claimed as this command's answer.
+    (hci-drop-events conn :event +hci-remote-version-evt+)
     (send-hci-command sock +ogf-link-ctl+ +ocf-read-remote-version+ params)
     (let ((evt (%await-hci-event conn :event +hci-remote-version-evt+
                                       :timeout-ms timeout-ms)))
@@ -168,6 +180,9 @@ than whatever an advertisement happened to arrive at."
         (h (%conn-handle conn handle))
         (params (make-octets 2)))
     (u16le-put params 0 h)
+    ;; Anything of this type still queued belongs to an earlier
+    ;; exchange and would be claimed as this command's answer.
+    (hci-drop-events conn :event +hci-command-complete-evt+)
     (send-hci-command sock +ogf-status-params+ +ocf-read-rssi+ params)
     (let ((evt (%await-hci-event conn :event +hci-command-complete-evt+
                                       :timeout-ms timeout-ms)))

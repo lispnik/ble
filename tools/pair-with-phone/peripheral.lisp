@@ -90,7 +90,7 @@ disconnects before anyone gets round to pairing."
       (format t "~&Connect, then READ characteristic FFE2 (\"secret\") in~%~
                    service FFE0. It is protected, so the read comes back~%~
                    Insufficient Authentication and the phone will pair.~%")
-      (format t "~&build: random-address+gap+gatt+trace~%")
+      (format t "~&build: one-reader+random-address+gap+gatt~%")
       (format t "~&Waiting up to ~D minutes...~%" +minutes+)
       (format t "~&================================================~%")
       (force-output)
@@ -103,7 +103,16 @@ disconnects before anyone gets round to pairing."
           (loop
             (when (> (get-internal-real-time) deadline)
               (format t "~&timed out -- nobody bonded~%") (return))
-            (let ((pkt (hci-poll-read sock 200)))
+            ;; Once connected, read ONLY through the connection: hci-pump
+            ;; files events where hci-take-event can find them. Polling the
+            ;; socket here as well made two readers race for the same packets,
+            ;; and whichever lost simply never saw them.
+            (let ((pkt (if conn
+                           (progn (hci-pump conn 60)
+                                  (or (hci-take-event conn :event #x3E :subevent #x05)
+                                      (hci-take-event conn :event #x08)
+                                      (hci-take-event conn :event #x05)))
+                           (hci-poll-read sock 200))))
               (when pkt
                 (cond
                   ;; connected

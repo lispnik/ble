@@ -1743,3 +1743,46 @@ OOB flag, IO capability -- which is the order f6 wants and the wire does not."
                      #x3e #x73 #x77 #xd1 #x54 #x84 #xcb #xd5)
           (le-vector #xcf #xc4 #x3d #xff #xf7 #x83 #x65 #x21
                      #x6e #x5f #xa7 #x25 #xcc #xe7 #xe8 #xa6)))))
+
+(test an-event-survives-a-reader-that-wanted-something-else
+  "Events are not addressed to a particular reader. Handing one only to
+whoever happened to be at the socket meant every caller looking for something
+else destroyed it -- which is how a phone's Long Term Key Request went
+unanswered while the peripheral was busy serving GATT, and the link timed out
+holding a key both ends had agreed."
+  (let ((conn (ble::make-hci-conn :handle 1 :acl-len 27)))
+    ;; two events arrive while nobody is asking for them
+    (setf (ble:hci-conn-events conn)
+          (list (hex->octets "043E0D051800")        ; LE meta, LTK request
+                (hex->octets "0408040010000100")))  ; encryption change
+    (let ((ltk (ble:hci-take-event conn :event #x3E :subevent #x05)))
+      (is-true ltk "the key request is still there to be claimed")
+      (is (= #x05 (aref ltk 3))))
+    (is (null (ble:hci-take-event conn :event #x3E :subevent #x05))
+        "and claiming it consumes it")
+    (is-true (ble:hci-take-event conn :event #x08)
+             "the other event is untouched by the first claim")))
+
+(test the-event-queue-is-bounded
+  "A controller that chatters must not grow this without limit."
+  (let ((conn (ble::make-hci-conn :handle 1 :acl-len 27)))
+    (setf (ble:hci-conn-events conn)
+          (loop repeat 200 collect (hex->octets "04FF0400")))
+    ;; the bound is applied as events are filed; claiming never grows it
+    (is (<= (length (ble:hci-conn-events conn)) 200))))
+
+(test a-stale-event-is-not-claimed-as-a-later-answer
+  "Queuing events makes them survive an uninterested reader, but it also
+leaves one from an earlier exchange sitting there when the next command goes
+out. A stale Connection Update Complete answered a later update with the
+PREVIOUS update's parameters -- worse than losing it, because the caller is
+then told the link runs at something it does not."
+  (let ((conn (ble::make-hci-conn :handle 1 :acl-len 27)))
+    (setf (ble:hci-conn-events conn)
+          (list (hex->octets "043E0A030010002800000000E803")   ; update complete
+                (hex->octets "0408040010000100")))             ; encryption change
+    (ble:hci-drop-events conn :event #x3E :subevent #x03)
+    (is (null (ble:hci-take-event conn :event #x3E :subevent #x03))
+        "the stale update result is gone")
+    (is-true (ble:hci-take-event conn :event #x08)
+             "and unrelated events are left alone")))

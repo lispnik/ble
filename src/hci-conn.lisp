@@ -175,7 +175,11 @@ floor along with every other non-ATT CID."
   ;; Connection-oriented channels, keyed by the CID we allocated for each,
   ;; plus the SPSMs we accept and the channels a peer has opened to them.
   (coc-channels '()) (coc-listeners '()) (coc-incoming '()) (coc-next-cid #x0040)
-  (smp-pending '()))
+  (smp-pending '())
+  ;; HCI events nobody has claimed yet. Events are not addressed to a
+  ;; particular reader, so a reader that is not looking for one must not be
+  ;; able to destroy it.
+  (events '()))
 
 (defun %await-le-connection (sock opcode timeout-ms)
   "Wait up to TIMEOUT-MS (a wall-clock deadline) for the (Enhanced)
@@ -434,7 +438,19 @@ through here, so a sixth is harder to write than to avoid."
       ((and (>= (length pkt) 2) (= (aref pkt 0) #x04))    ; HCI event
        (if (= (aref pkt 1) +hci-disconn-complete-evt+)
            :disconnected
-           pkt))
+           (progn
+             ;; File it as well as returning it. An event arrives whenever the
+             ;; controller has something to say -- a Long Term Key Request in
+             ;; the middle of serving GATT, say -- and the reader that happens
+             ;; to be at the socket is usually not the one who wants it.
+             ;; Returning it only to whoever pumped meant it was discarded by
+             ;; every caller that was looking for something else, which is how
+             ;; a phone's request for the key went unanswered until it gave up.
+             (setf (hci-conn-events conn)
+                   (nconc (hci-conn-events conn) (list pkt)))
+             (loop while (> (length (hci-conn-events conn)) 64)
+                   do (pop (hci-conn-events conn)))
+             pkt)))
       ((and (= (aref pkt 0) #x02) (>= (length pkt) 5))    ; ACL data
        (let* ((flags (u16-le pkt 1))
               (pb (logand (ash flags -12) #x3))
@@ -452,6 +468,41 @@ through here, so a sixth is harder to write than to avoid."
          (%maybe-serve-signalling conn)
          :data))
       (t :data))))
+
+(defun hci-take-event (conn &key event subevent)
+  "Claim a queued HCI event matching EVENT (and SUBEVENT), or NIL.
+
+Events are filed by HCI-PUMP rather than handed to whoever happened to be
+reading, so a caller waiting on one can find it even though another part of
+the program pulled it off the socket."
+  (let ((hit (find-if (lambda (p)
+                        (and (>= (length p) 2)
+                             (or (null event) (= (aref p 1) event))
+                             (or (null subevent)
+                                 (and (>= (length p) 4) (= (aref p 3) subevent)))))
+                      (hci-conn-events conn))))
+    (when hit
+      (setf (hci-conn-events conn)
+            (remove hit (hci-conn-events conn) :count 1))
+      hit)))
+
+(defun hci-drop-events (conn &key event subevent)
+  "Discard queued events of this type.
+
+Called before issuing a command whose completion will be awaited. Queuing
+events makes them survive an uninterested reader, but it also means an event
+from an *earlier* exchange is still sitting there when the next command goes
+out -- and it will be claimed as that command\'s answer. A stale Connection
+Update Complete answered a later update with the previous update\'s
+parameters, which is worse than losing it: the caller is told the link is
+running at something it is not."
+  (setf (hci-conn-events conn)
+        (remove-if (lambda (p)
+                     (and (>= (length p) 2)
+                          (or (null event) (= (aref p 1) event))
+                          (or (null subevent)
+                              (and (>= (length p) 4) (= (aref p 3) subevent)))))
+                   (hci-conn-events conn))))
 
 (defun hci-acl-recv-att (conn timeout-ms)
   "The next ATT PDU: octets, NIL on timeout, or :DISCONNECTED.

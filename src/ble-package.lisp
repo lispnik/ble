@@ -173,6 +173,9 @@
           hci-conn-handle
           hci-conn-close
           hci-pump
+          hci-take-event
+          hci-drop-events
+          hci-conn-events
           ;; GATT server: the attribute database and the half of ATT that
           ;; answers requests (src/gatt-server.lisp)
           make-gatt-server
