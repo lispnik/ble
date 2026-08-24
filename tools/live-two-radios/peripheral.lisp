@@ -14,7 +14,15 @@
 (handler-bind ((warning #'muffle-warning)) (asdf:load-system :ble))
 (in-package #:ble)
 
-(defparameter +dev+ 1)
+;;; Configuration comes from the environment so the runner can pick adapters
+;;; by bus rather than by an index that drifts across reboots. run.sh sets
+;;; these; the fallbacks only make the file usable by hand.
+(defun env-int (name default)
+  (let ((v (sb-ext:posix-getenv name)))
+    (if (and v (plusp (length v))) (parse-integer v :junk-allowed t) default)))
+
+(defparameter +dev+ (env-int "PERIPH_DEV" 1))
+(defparameter +serve-seconds+ (env-int "PERIPH_SECONDS" 120))
 (defparameter *counter* 0)
 
 (defun build-server ()
@@ -76,7 +84,7 @@
                                     (map 'vector #'char-code "TWOHAND")))
     (with-advertising (sock)
       (format t "~&[peripheral] advertising as TWOHAND~%") (force-output)
-      (let ((handle (await-connection sock 90000)))
+      (let ((handle (await-connection sock (* 1000 (env-int "PERIPH_WAIT" 90)))))
         (if (null handle)
             (format t "~&[peripheral] no central attached~%")
             (let ((conn (make-hci-conn :sock sock :handle handle
@@ -84,22 +92,35 @@
                   (served 0) (sent 0))
               (format t "~&[peripheral] connected, handle 0x~4,'0X~%" handle)
               (force-output)
-              ;; Serve for a while, and notify both characteristics once the
-              ;; client subscribes. Two notifying characteristics on one link
-              ;; is what the client's per-handle dispatch has to cope with.
-              (dotimes (i 400)
-                (let ((op (gatt-serve server conn :timeout-ms 100)))
-                  (cond ((eq op :disconnected)
-                         (format t "~&[peripheral] client went away~%")
-                         (return))
-                        (op (incf served))))
-                (when (zerop (mod i 4))
-                  (when (gatt-notify server conn ffe1
-                                     (vector #xA0 (mod i 256)) :cccd-handle cccd1)
-                    (incf sent))
-                  (when (gatt-notify server conn ffe2
-                                     (vector #xB0 (mod i 256)) :cccd-handle cccd2)
-                    (incf sent))))
+              ;; Serve until the client leaves or the deadline passes, and
+              ;; notify both characteristics once it subscribes -- two
+              ;; notifying characteristics on one link is what the client's
+              ;; per-handle dispatch has to cope with.
+              ;;
+              ;; A wall-clock deadline rather than a fixed iteration count:
+              ;; how many iterations a run needs depends on how many requests
+              ;; the client makes, and counting them meant that adding one
+              ;; check to the client could starve the end of its own run.
+              (let ((deadline (+ (get-internal-real-time)
+                                 (* +serve-seconds+
+                                    internal-time-units-per-second)))
+                    (i 0))
+                (loop
+                  (when (> (get-internal-real-time) deadline)
+                    (format t "~&[peripheral] deadline reached~%")
+                    (return))
+                  (let ((op (gatt-serve server conn :timeout-ms 100)))
+                    (cond ((eq op :disconnected)
+                           (format t "~&[peripheral] client went away~%")
+                           (return))
+                          (op (incf served))))
+                  (when (zerop (mod (incf i) 4))
+                    (when (gatt-notify server conn ffe1
+                                       (vector #xA0 (mod i 256)) :cccd-handle cccd1)
+                      (incf sent))
+                    (when (gatt-notify server conn ffe2
+                                       (vector #xB0 (mod i 256)) :cccd-handle cccd2)
+                      (incf sent)))))
               (format t "~&[peripheral] answered ~D requests, sent ~D notifications~%"
                       served sent)
               (force-output)))))))

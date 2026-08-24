@@ -10,8 +10,15 @@
        :ignore-inherited-configuration))
 (handler-bind ((warning #'muffle-warning)) (asdf:load-system :ble))
 
-(defparameter *peer* "3C:64:CF:2D:55:A3")   ; hci1, the peripheral
-(defparameter *dev* 2)                      ; hci2, this side
+;;; Set by run.sh from pick-adapters.lisp, which chooses by bus. The
+;;; fallbacks only make this file usable by hand; hciN numbering drifts across
+;;; reboots, so do not trust them.
+(defun env-or (name default)
+  (let ((v (sb-ext:posix-getenv name)))
+    (if (and v (plusp (length v))) v default)))
+
+(defparameter *peer* (env-or "PEER_MAC" "3C:64:CF:2D:55:A3"))
+(defparameter *dev* (parse-integer (env-or "CENTRAL_DEV" "2")))
 
 (ble:install-adapter-teardown)
 

@@ -40,6 +40,7 @@
                    ;; anything else drives hardware: compile only
                    (t (ignore-errors (compile nil `(lambda () ,form))))))))))
 
+(check-file "tools/live-two-radios/pick-adapters.lisp")
 (check-file "tools/live-two-radios/peripheral.lisp")
 
 ;; build-server is pure, so check what it actually produces.

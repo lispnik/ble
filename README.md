@@ -228,9 +228,26 @@ multi-handle dispatch has no natural peer to be tested against — and a peer
 built from the same code you are testing proves less.
 
 ```sh
-sudo sbcl --non-interactive --load tools/live-two-radios/peripheral.lisp &
-sudo sbcl --non-interactive --load tools/live-two-radios/central.lisp
+sudo tools/live-two-radios/run.sh
 ```
+
+That is the whole invocation, and it is meant to be run repeatedly. It picks
+the two adapters **by bus** — `hciN` numbering drifts across reboots, and on
+this machine the built-in UART radio holds hci0 while the dongles land at 1
+and 2 — reads the peripheral's address before anything takes a controller
+away, waits for the peripheral to actually advertise rather than sleeping a
+guessed interval, and exits with the central's status.
+
+It also recovers from the previous run before starting: killing a peripheral
+mid-session leaves its adapter DOWN and unusable by anything on the machine,
+so one crash would otherwise make every later run fail for a reason unrelated
+to the code under test. `run.sh` ups every adapter and clears stale harness
+processes first, and kills the peripheral on every exit path including
+interrupts. Verified by doing it: three consecutive runs, then a run started
+from a deliberately downed adapter, all 25/25.
+
+`PERIPH_DEV`, `CENTRAL_DEV` and `PEER_MAC` override the choice if you need a
+particular pairing; `PERIPH_SECONDS` bounds how long the peripheral serves.
 
 `compile-check.lisp` beside them needs no hardware at all: it loads every
 definition, compiles the forms that drive the radios without running them, and
