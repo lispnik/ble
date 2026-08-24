@@ -1522,3 +1522,20 @@ one, so asking for MITM cannot conjure one."
   ;; 20 bits is enough for six digits, which is why it is twenty rounds
   (is (< 999999 (expt 2 20)))
   (is (= #x80 (ble:passkey-bit 0 19))))
+
+(test a-dropped-link-is-not-reported-as-a-rejection
+  "It used to be: a disconnect returned the same NIL as a timeout, so the
+caller announced `we rejected the peer: unspecified reason' -- wrong about
+who, wrong about why, and it spent the whole timeout getting there."
+  (let ((dropped (make-condition 'ble:smp-error :reason #x08 :source :disconnected))
+        (refused (make-condition 'ble:smp-error :reason #x04 :source :peer))
+        (ours    (make-condition 'ble:smp-error :reason #x0B :source :local)))
+    (is (search "link dropped" (princ-to-string dropped))
+        "a dropped link says so")
+    (is (not (search "rejected" (princ-to-string dropped)))
+        "and does not claim anyone rejected anything")
+    (is (search "the peer rejected us" (princ-to-string refused)))
+    (is (search "confirm value failed" (princ-to-string refused))
+        "carrying the peer's own reason")
+    (is (search "we rejected the peer" (princ-to-string ours)))
+    (is (search "DHKey check failed" (princ-to-string ours)))))

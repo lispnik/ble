@@ -196,7 +196,9 @@ reaching the same secret. Over two radios, an initiator and a responder in
 separate processes derive a byte-identical LTK and the controllers report the
 link encrypted — with a *different* LTK each run, and with passkey entry a
 deliberately mismatched passkey is rejected rather than quietly falling back
-to Just Works. But **both ends are this code**, so agreement demonstrates
+to Just Works, each end naming the same cause from its own side: *the peer
+rejected us: confirm value failed* against *we rejected the peer: confirm
+value failed*. But **both ends are this code**, so agreement demonstrates
 internal consistency rather than conformance: a systematically wrong `f5`
 would agree with itself. Interop against an independent stack is the proof
 that is missing. It was attempted against BlueZ three ways and none completed

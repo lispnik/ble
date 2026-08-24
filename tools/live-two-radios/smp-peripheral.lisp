@@ -67,5 +67,11 @@
                                           (aref pkt 3) (aref pkt 6))
                                   (force-output)
                                   (return))))))
-                (smp-error (e) (format t "~&[p] ~A~%" e)))))))))
+                (smp-error (e)
+                  (format t "~&[p] ~A~%" e) (force-output)
+                  ;; Keep the link a moment so the Pairing Failed we just sent
+                  ;; actually leaves the controller. Tearing down immediately
+                  ;; discards it, and the peer then reports a timeout instead
+                  ;; of the reason we gave it.
+                  (dotimes (i 20) (ble::%pump conn 100))))))))))
 (sb-ext:exit)

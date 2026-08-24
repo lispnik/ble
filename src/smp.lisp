@@ -119,12 +119,16 @@ makes passkey entry twenty exchanges rather than one."
   ((reason :initarg :reason :reader smp-error-reason)
    (source :initarg :source :initform :peer :reader smp-error-source))
   (:report (lambda (c s)
-             (format s "pairing failed (~A): ~A"
-                     (ecase (smp-error-source c)
-                       (:peer "the peer rejected us")
-                       (:local "we rejected the peer"))
-                     (or (cdr (assoc (smp-error-reason c) +smp-failure-reasons+))
-                         (format nil "reason 0x~2,'0X" (smp-error-reason c))))))
+             (if (eq (smp-error-source c) :disconnected)
+                 (format s "pairing failed: the link dropped before it finished")
+                 (format s "pairing failed (~A): ~A"
+                         (ecase (smp-error-source c)
+                           (:peer "the peer rejected us")
+                           (:local "we rejected the peer"))
+                         (or (cdr (assoc (smp-error-reason c)
+                                         +smp-failure-reasons+))
+                             (format nil "reason 0x~2,'0X"
+                                     (smp-error-reason c)))))))
   (:documentation
    "Pairing did not complete. SOURCE says which end refused, which is the
 first question worth answering: the same reason code means something quite
@@ -174,28 +178,43 @@ order. TYPE is :PUBLIC or :RANDOM."
   (hci-acl-send-l2cap conn +smp-cid+ (cat (vector opcode) payload)))
 
 (defun smp-next (conn &key (timeout-ms 10000) expect)
-  "The next SMP PDU, or NIL. Signals SMP-ERROR on Pairing Failed.
+  "The next SMP PDU, or NIL on timeout. Signals SMP-ERROR on Pairing Failed,
+and on the link dropping.
+
+A dropped link is reported as itself rather than folded into the timeout. It
+used to return NIL, which callers turned into `we rejected the peer:
+unspecified reason' -- wrong twice over, since nothing was rejected here and
+the cause was not unspecified. It also spent the whole timeout to say so.
 
 Frames for other channels keep flowing while this waits: the ATT layer's PDUs
 stay in PENDING and the signalling channel is served as usual. Pairing does
 not stop the rest of the link."
   (let ((deadline (+ (get-internal-real-time)
                      (round (* timeout-ms internal-time-units-per-second) 1000))))
-    (loop
-      (let ((hit (find-if (lambda (f)
-                            (and (plusp (length f))
-                                 (or (null expect) (= (aref f 0) expect)
-                                     (= (aref f 0) +smp-pairing-failed+))))
-                          (hci-conn-smp-pending conn))))
-        (when hit
-          (setf (hci-conn-smp-pending conn)
-                (remove hit (hci-conn-smp-pending conn) :count 1))
-          (when (= (aref hit 0) +smp-pairing-failed+)
-            (error 'smp-error :source :peer
-                              :reason (if (>= (length hit) 2) (aref hit 1) #x08)))
-          (return hit)))
-      (when (<= (- deadline (get-internal-real-time)) 0) (return nil))
-      (when (eq :disconnected (%pump conn 200)) (return nil)))))
+    (flet ((claim ()
+             (let ((hit (find-if (lambda (f)
+                                   (and (plusp (length f))
+                                        (or (null expect) (= (aref f 0) expect)
+                                            (= (aref f 0) +smp-pairing-failed+))))
+                                 (hci-conn-smp-pending conn))))
+               (when hit
+                 (setf (hci-conn-smp-pending conn)
+                       (remove hit (hci-conn-smp-pending conn) :count 1))
+                 (when (= (aref hit 0) +smp-pairing-failed+)
+                   (error 'smp-error :source :peer
+                                     :reason (if (>= (length hit) 2)
+                                                 (aref hit 1) #x08)))
+                 hit))))
+      (loop
+        (let ((hit (claim))) (when hit (return hit)))
+        (when (<= (- deadline (get-internal-real-time)) 0) (return nil))
+        (when (eq :disconnected (%pump conn 200))
+          ;; A peer that refuses usually sends Pairing Failed and drops
+          ;; immediately after, so the frame and the disconnect can surface
+          ;; from the same read. Look once more before blaming the link: the
+          ;; reason it gave is worth more than the fact that it left.
+          (let ((hit (claim))) (when hit (return hit)))
+          (error 'smp-error :reason #x08 :source :disconnected))))))
 
 (defun %smp-note-frame (conn frame)
   (setf (hci-conn-smp-pending conn)
