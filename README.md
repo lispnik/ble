@@ -66,9 +66,24 @@ through the same call as notifications and the required confirmation is sent
 for you. Without that a peer sends one indication and then waits forever,
 which presents as a device that stopped talking.
 
-Not implemented: Read Multiple, Prepare/Execute Write (so no write longer than
-MTU−3 to a single attribute), and SMP — this cannot talk to a peer that
-requires a bonded link.
+Long and batched access: `att-read-long-value` and `att-read-multiple`,
+`att-prepare-write` / `att-execute-write`, and `att-write-long-value` for a
+value larger than MTU−3. These are exercised by the test suite but not against
+hardware — neither consumer has an attribute long enough to need them.
+
+Not implemented:
+
+- **SMP** — no pairing, bonding or encryption, so this cannot talk to a peer
+  that requires a bonded link. The largest single gap.
+- **A GATT server.** This library can advertise, but it cannot serve
+  attributes, so it cannot be a peripheral.
+- **Notifications on more than one characteristic at a time.**
+  `att-next-notification` filters on one handle and drops anything else it
+  reads, so a second subscription's traffic is silently lost. Fine for a
+  device with a single notifying characteristic, which is what both consumers
+  have; wrong for anything else.
+- **Connection parameter update**, and the LE privacy features (resolving
+  list, RPA) and controller filter-accept-list.
 
 **Two transports, one ATT layer.** `att-send` and `att-recv` dispatch on
 whether the channel is an integer fd (a kernel L2CAP socket) or an `hci-conn`,
