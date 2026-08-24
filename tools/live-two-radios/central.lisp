@@ -63,11 +63,12 @@
              (ffe1 (ble:find-char-by-uuid chars (u #xFFE1)))
              (ffe2 (ble:find-char-by-uuid chars (u #xFFE2)))
              (ffe3 (ble:find-char-by-uuid chars (u #xFFE3)))
-             (ffe4 (ble:find-char-by-uuid chars (u #xFFE4))))
+             (ffe4 (ble:find-char-by-uuid chars (u #xFFE4)))
+             (ffe5 (ble:find-char-by-uuid chars (u #xFFE5))))
         (format t "~&[central] characteristics: ~{~A ~}~%"
                 (mapcar #'ble:gatt-char-uuid-string chars))
-        (check (= 6 (length chars)) "all six characteristics discovered")
-        (check (and ffe1 ffe2 ffe3 ffe4) "including every vendor one")
+        (check (= 7 (length chars)) "all seven characteristics discovered")
+        (check (and ffe1 ffe2 ffe3 ffe4 ffe5) "including every vendor one")
         (let ((props (ble:gatt-char-property-names ffe1)))
           (format t "~&[central] FFE1 properties: ~A~%" props)
           (check (and (member :read props) (member :write props)
@@ -107,6 +108,23 @@
                "the server's on-write hook refuses with its own error code")
         (check (eq t (ble:att-write-value chan (ble:gatt-char-handle ffe3) #(7)))
                "and accepts the write it considers valid")
+
+        ;; --- a long write, over the air ------------------------------------
+        ;; At MTU 23 a Write Request carries 20 octets, so 300 only arrives if
+        ;; Prepare Write and Execute Write both work on both sides. This is
+        ;; the path whose client half had the mirror image of the MTU bug and
+        ;; still passed every in-process check.
+        (let ((payload (ble:make-octets 300))
+              (h (ble:gatt-char-handle ffe5)))
+          (dotimes (i 300) (setf (aref payload i) (mod (* i 7) 251)))
+          (let ((r (ble:att-write-long-value chan h payload)))
+            (format t "~&[central] long write of 300 octets -> ~S~%" r)
+            (check (eq t r) "a 300-octet write is acknowledged"))
+          (let ((back (ble:att-read-long-value chan h)))
+            (format t "~&[central] read back: ~D octets~%" (length back))
+            (check (= 300 (length back)) "and reads back at full length")
+            (check (equalp payload back)
+                   "with every octet as written, in order")))
 
         ;; --- two subscriptions at once -------------------------------------
         (let ((cccd1 (ble:att-find-cccd chan (ble:gatt-char-handle ffe1)))

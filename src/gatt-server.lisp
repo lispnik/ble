@@ -69,6 +69,10 @@ a write, or an ATT error code to refuse it."
   (rx-mtu 23)
   (mtu 23)
   (cccd (make-hash-table :test #'eql))
+  ;; Fragments from Prepare Write Requests, oldest first. Nothing here has
+  ;; taken effect: that is the point of the queue, and why an Execute Write
+  ;; that cancels must be able to discard it whole.
+  (prepared '())
   (current-service nil))
 
 (defstruct gatt-service-entry start end uuid)
@@ -177,6 +181,17 @@ characteristic does not notify."
 (defconstant +att-err-write-not-permitted+  #x03)
 (defconstant +att-err-request-not-supported+ #x06)
 (defconstant +att-err-unsupported-group-type+ #x10)
+(defconstant +att-err-prepare-queue-full+   #x09)
+(defconstant +att-err-invalid-value-length+ #x0D)
+
+(defparameter +max-attribute-length+ 512
+  "The ATT maximum attribute length. A long write may not build a value past
+it, which is also what stops a peer growing one without bound.")
+
+(defparameter *max-prepared-writes* 64
+  "How many fragments one prepare queue may hold before the server answers
+Prepare Queue Full. Without a bound a client could queue fragments until the
+server ran out of memory, and never execute them.")
 
 (defun %send-att-error (chan opcode handle code)
   (let ((pdu (make-octets 5)))
@@ -390,6 +405,87 @@ cares should use a request."
                          (setf (aref rsp 0) +att-write-rsp+)
                          rsp))))))
 
+(defun %handle-prepare-write (server chan pdu)
+  "Prepare Write: queue a fragment and echo it back verbatim.
+
+The echo is required, and it is not a formality -- it is what lets a client
+run a reliable long write, comparing what came back against what it sent and
+cancelling if any fragment was mangled. Nothing is applied here; a value
+arrives whole at Execute or not at all."
+  (let* ((handle (u16-le pdu 1))
+         (offset (u16-le pdu 3))
+         (value (subseq pdu 5))
+         (attr (gatt-find-attribute server handle)))
+    (cond
+      ((null attr)
+       (%send-att-error chan +att-prepare-write-req+ handle +att-err-invalid-handle+))
+      ((not (%writable-p attr))
+       (%send-att-error chan +att-prepare-write-req+ handle
+                        +att-err-write-not-permitted+))
+      ((> (+ offset (length value)) +max-attribute-length+)
+       (%send-att-error chan +att-prepare-write-req+ handle
+                        +att-err-invalid-value-length+))
+      ((>= (length (gatt-server-prepared server)) *max-prepared-writes*)
+       (%send-att-error chan +att-prepare-write-req+ handle
+                        +att-err-prepare-queue-full+))
+      (t
+       (setf (gatt-server-prepared server)
+             (nconc (gatt-server-prepared server)
+                    (list (list handle offset (coerce-octets value)))))
+       ;; The response is the request with a different opcode.
+       (let ((rsp (make-octets (length pdu))))
+         (replace rsp pdu)
+         (setf (aref rsp 0) +att-prepare-write-rsp+)
+         (att-send chan rsp))))))
+
+(defun %apply-prepared (server)
+  "Assemble the queued fragments and commit them. Returns NIL, or (VALUES CODE
+HANDLE) if some attribute refused.
+
+Fragments are laid into a copy per handle first, so a hook that refuses sees
+the whole value it is being asked to accept rather than a piece of it, and a
+refusal leaves the attribute as it was."
+  (let ((pending '()))                  ; handle -> assembled octets
+    (dolist (frag (gatt-server-prepared server))
+      (destructuring-bind (handle offset value) frag
+        (let* ((entry (assoc handle pending))
+               (attr (gatt-find-attribute server handle)))
+          (unless entry
+            (setf entry (cons handle (copy-seq (gatt-attribute-value attr))))
+            (push entry pending))
+          (let* ((needed (+ offset (length value)))
+                 (buf (cdr entry)))
+            (when (> needed (length buf))
+              (let ((grown (make-octets needed)))
+                (replace grown buf)
+                (setf buf grown (cdr entry) grown)))
+            (replace buf value :start1 offset)))))
+    (dolist (entry (nreverse pending))
+      (destructuring-bind (handle . value) entry
+        (let* ((attr (gatt-find-attribute server handle))
+               (hook (gatt-attribute-on-write attr)))
+          (if hook
+              (let ((code (funcall hook server attr value)))
+                (when (integerp code)
+                  (return-from %apply-prepared (values code handle))))
+              (setf (gatt-attribute-value attr) value)))))
+    nil))
+
+(defun %handle-execute-write (server chan pdu)
+  "Execute Write: commit the queue, or discard it when FLAGS is 0.
+
+The queue is cleared either way, including when a commit fails. Leaving it
+would hand whoever wrote next a half-built value to commit on top of."
+  (let ((commit (and (>= (length pdu) 2) (= (aref pdu 1) 1))))
+    (multiple-value-bind (code handle)
+        (when commit (%apply-prepared server))
+      (setf (gatt-server-prepared server) '())
+      (if code
+          (%send-att-error chan +att-execute-write-req+ handle code)
+          (att-send chan (let ((rsp (make-octets 1)))
+                           (setf (aref rsp 0) +att-execute-write-rsp+)
+                           rsp))))))
+
 (defun %handle-exchange-mtu (server chan pdu)
   (let ((client (u16-le pdu 1))
         (ours (gatt-server-rx-mtu server))
@@ -425,9 +521,18 @@ Response that says so."
           ((= op +att-read-multiple-req+) (need 5) (%handle-read-multiple server chan pdu) op)
           ((= op +att-write-req+) (need 3) (%handle-write server chan pdu) op)
           ((= op +att-write-cmd+) (need 3) (%handle-write server chan pdu :command t) op)
+          ((= op +att-prepare-write-req+) (need 5)
+           (%handle-prepare-write server chan pdu) op)
+          ((= op +att-execute-write-req+) (need 2)
+           (%handle-execute-write server chan pdu) op)
           ((= op +att-handle-value-cfm+) op)  ; our indication was confirmed
           ;; A command carries no response, so an unsupported one is dropped
           ;; rather than refused -- answering would itself be a protocol error.
+          ;; Signed Write (0xD2) lands here deliberately: verifying its
+          ;; signature needs a CSRK, which is distributed by bonding, which
+          ;; needs SMP. Until this library has SMP the only honest thing to do
+          ;; with a signed write is ignore it -- accepting one unverified
+          ;; would be worse than not supporting it.
           ((logbitp 6 op) nil)
           (t (%send-att-error chan op 0 +att-err-request-not-supported+) nil))))))
 

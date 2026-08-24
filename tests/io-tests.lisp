@@ -887,8 +887,10 @@ database that reads plausibly and points at the wrong attributes."
 (test an-unsupported-request-is-refused-not-ignored
   (let* ((lb (make-loopback (demo-server)))
          (chan (loopback-client lb)))
-    ;; 0x16 Prepare Write Request: this server does not implement it
-    (let ((rsp (ble:att-request chan (hex->octets "16" "0300" "0000" "AA"))))
+    ;; 0x20 Read Multiple Variable Length Request (BT 5.2): a real request
+    ;; this server does not implement, so it must be refused rather than
+    ;; ignored -- a client is waiting for an answer to it.
+    (let ((rsp (ble:att-request chan (hex->octets "20" "0300" "0500"))))
       (is-true (ble:att-error-p rsp) "an Error Response must come back")
       (is (= #x06 (aref rsp 4)) "request not supported"))))
 
@@ -1065,3 +1067,128 @@ would suggest more to come -- so the read stopped, returned 22 octets of a
     (ble:att-forget-mtu chan)
     (is (= 23 (ble:att-mtu chan))
         "and back to the default once forgotten")))
+
+;;; --- long writes: Prepare/Execute on the server -------------------------
+
+(defun long-write-server (&key (mtu 23) on-write)
+  (let ((server (ble:make-gatt-server :mtu mtu)))
+    (ble:gatt-add-service server #xFFE0)
+    (values server
+            (ble:gatt-add-characteristic server :uuid #xFFE5
+                                                :properties '(:read :write)
+                                                :value (ble:make-octets 0)
+                                                :on-write on-write))))
+
+(test a-long-write-arrives-whole
+  "300 octets through Prepare Write and Execute Write, then read back. At MTU
+23 a plain Write Request carries 20, so this only completes if both ends
+fragment and reassemble correctly."
+  (multiple-value-bind (server h) (long-write-server)
+    (let* ((lb (make-loopback server))
+           (chan (loopback-client lb))
+           (payload (ble:make-octets 300)))
+      (dotimes (i 300) (setf (aref payload i) (mod (* i 7) 251)))
+      (ble:att-exchange-mtu chan 247)
+      (is (eq t (ble:att-write-long-value chan h payload))
+          "the execute is acknowledged")
+      (is (equalp payload (ble:att-read-long-value chan h))
+          "and every octet of it is what a later read returns"))))
+
+(test nothing-takes-effect-until-the-execute
+  "The point of the queue: a client that gives up midway must leave the
+attribute exactly as it was."
+  (multiple-value-bind (server h) (long-write-server)
+    (let* ((lb (make-loopback server))
+           (chan (loopback-client lb)))
+      (ble:gatt-set-value server h #(1 2 3))
+      (ble:att-prepare-write chan h 0 #(9 9 9))
+      (ble:att-prepare-write chan h 3 #(8 8 8))
+      (is (equalp #(1 2 3)
+                  (ble:gatt-attribute-value (ble:gatt-find-attribute server h)))
+          "queued fragments must not be visible")
+      (ble:att-execute-write chan :cancel t)
+      (is (equalp #(1 2 3)
+                  (ble:gatt-attribute-value (ble:gatt-find-attribute server h)))
+          "and a cancelled queue must leave it untouched"))))
+
+(test a-cancelled-queue-does-not-leak-into-the-next-write
+  (multiple-value-bind (server h) (long-write-server)
+    (let* ((lb (make-loopback server))
+           (chan (loopback-client lb)))
+      (ble:att-prepare-write chan h 0 #(9 9 9))
+      (ble:att-execute-write chan :cancel t)
+      (ble:att-prepare-write chan h 0 #(4 4))
+      (ble:att-execute-write chan)                        ; commit
+      (is (equalp #(4 4)
+                  (ble:gatt-attribute-value (ble:gatt-find-attribute server h)))
+          "only the second queue may be committed"))))
+
+(test a-hook-sees-the-whole-value-not-a-fragment
+  "A characteristic that validates its value has to be shown all of it, or it
+would refuse a perfectly good long write on the strength of its first 20
+octets."
+  (let ((seen '()))
+    (multiple-value-bind (server h)
+        (long-write-server :on-write (lambda (s a v)
+                                       (declare (ignore s a))
+                                       (push (length v) seen)
+                                       (if (= 100 (length v)) nil #x0D)))
+      (let* ((lb (make-loopback server))
+             (chan (loopback-client lb))
+             (payload (ble:make-octets 100)))
+        (ble:att-exchange-mtu chan 247)
+        (is (eq t (ble:att-write-long-value chan h payload))
+            "the hook accepts the assembled value")
+        (is (equal '(100) seen)
+            "and was called exactly once, with the whole 100 octets")))))
+
+(test a-refused-long-write-leaves-the-attribute-alone
+  (multiple-value-bind (server h)
+      (long-write-server :on-write (lambda (s a v) (declare (ignore s a v)) #x0D))
+    (let* ((lb (make-loopback server))
+           (chan (loopback-client lb)))
+      (ble:gatt-set-value server h #(7 7))
+      (ble:att-exchange-mtu chan 247)
+      (let ((r (ble:att-write-long-value chan h (ble:make-octets 60))))
+        (is (= #x0D r) "the hook's code reaches the client"))
+      (is (equalp #(7 7)
+                  (ble:gatt-attribute-value (ble:gatt-find-attribute server h)))
+          "and the refused value was never committed"))))
+
+(test the-prepare-queue-is-bounded
+  (multiple-value-bind (server h) (long-write-server)
+    (let* ((lb (make-loopback server))
+           (chan (loopback-client lb))
+           (ble:*max-prepared-writes* 3)
+           (codes '()))
+      (dotimes (i 5)
+        (push (nth-value 1 (ble:att-prepare-write chan h (* i 2) #(1 2))) codes))
+      (is (member #x09 codes)
+          "a queue that will not fit must answer Prepare Queue Full"))))
+
+(test a-write-past-the-maximum-attribute-length-is-refused
+  (multiple-value-bind (server h) (long-write-server)
+    (let* ((lb (make-loopback server))
+           (chan (loopback-client lb)))
+      (is (= #x0D (nth-value 1 (ble:att-prepare-write chan h 510 #(1 2 3 4 5))))
+          "512 is the ATT maximum; a fragment ending past it is invalid"))))
+
+(test prepare-write-echoes-the-fragment-back
+  "The echo is what lets a client verify a reliable write fragment by
+fragment, so it has to be the value, not just an acknowledgement."
+  (multiple-value-bind (server h) (long-write-server)
+    (let* ((lb (make-loopback server))
+           (chan (loopback-client lb))
+           (echo (ble:att-prepare-write chan h 4 #(#xAA #xBB))))
+      (is (= h (ble:u16-le echo 0)) "the echo names the handle")
+      (is (= 4 (ble:u16-le echo 2)) "and the offset")
+      (is (equalp #(#xAA #xBB) (subseq echo 4))
+          "and the queued octets come back verbatim"))))
+
+(test an-unwritable-attribute-refuses-a-prepare
+  (multiple-value-bind (server) (demo-server)
+    (let* ((lb (make-loopback server))
+           (chan (loopback-client lb)))
+      ;; handle 3 is the read-only manufacturer string
+      (is (= #x03 (nth-value 1 (ble:att-prepare-write chan 3 0 #(1))))
+          "write-not-permitted, at prepare time rather than at execute"))))

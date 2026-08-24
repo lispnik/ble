@@ -196,6 +196,8 @@
           gatt-service-entry-end
           gatt-service-entry-uuid
           gatt-serve
+          *max-prepared-writes*
+          +max-attribute-length+
           gatt-serve-pdu
           gatt-notify
           gatt-subscribed-p

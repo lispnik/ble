@@ -53,10 +53,16 @@
                                         (unless (= 1 (length v)) #x0D))))
               (ffe4 (gatt-add-characteristic server :uuid #xFFE4
                                              :properties '(:read)
-                                             :value long)))
+                                             :value long))
+              ;; Writable and long, so the client's Prepare/Execute path has
+              ;; something over the air to write to. Nothing else here has a
+              ;; writable attribute bigger than one Write Request.
+              (ffe5 (gatt-add-characteristic server :uuid #xFFE5
+                                             :properties '(:read :write)
+                                             :value (make-octets 0))))
           (format t "~&[peripheral] ~D attributes; FFE1 ~D/cccd ~D, FFE2 ~D/cccd ~D, ~
-                     FFE3 ~D, FFE4 ~D~%"
-                  (gatt-attribute-count server) ffe1 cccd1 ffe2 cccd2 ffe3 ffe4)
+                     FFE3 ~D, FFE4 ~D, FFE5 ~D~%"
+                  (gatt-attribute-count server) ffe1 cccd1 ffe2 cccd2 ffe3 ffe4 ffe5)
           (values server ffe1 cccd1 ffe2 cccd2))))))
 
 (defun await-connection (sock timeout-ms)

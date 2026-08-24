@@ -111,8 +111,18 @@ notifies — and hands back the handles it assigned rather than making you
 derive them.
 
 It answers Exchange MTU, Find Information, Find By Type Value, Read By Type,
-Read By Group Type, Read, Read Blob, Read Multiple, Write and Write Command,
-and refuses anything else with `request not supported`. `on-read` computes a
+Read By Group Type, Read, Read Blob, Read Multiple, Write, Write Command, and
+Prepare/Execute Write, and refuses anything else with `request not supported`.
+
+Long writes go through the prepare queue, so nothing takes effect until the
+Execute: a client that gives up midway leaves the attribute exactly as it was,
+and a cancelled queue cannot leak into the next write. An `on-write` hook is
+called once with the **assembled** value rather than per fragment — a
+characteristic that validates its contents would otherwise refuse a perfectly
+good long write on the strength of its first twenty octets — and a refusal
+leaves the old value in place. The queue is bounded by
+`*max-prepared-writes*`, since a client could otherwise queue fragments
+forever and never execute them. `on-read` computes a
 value at the moment it is asked for, which is what a sensor characteristic
 wants; `on-write` returns an ATT error code to refuse a write. `gatt-notify`
 declines to send unless the client has actually subscribed — sending anyway is
@@ -165,7 +175,9 @@ receive. They differ whenever the peer offers less, and sizing by the wrong
 one truncates a long read silently. The read side is exercised over real
 radios by `tools/live-two-radios/`, whose server offers a 300-octet
 characteristic behind a 23-octet MTU; the long *write* is still suite-only,
-since neither consumer has a writable attribute that big.
+and the long *write* by the same harness, whose server now offers a writable
+300-octet characteristic — at MTU 23 a Write Request carries 20 octets, so it
+completes only if Prepare and Execute work on both sides.
 
 Not implemented:
 
@@ -174,9 +186,11 @@ Not implemented:
 - **Connection parameter update**, and the LE privacy features (resolving
   list, RPA) and controller filter-accept-list.
 - **L2CAP connection-oriented channels**, so no high-throughput transfers.
-- **Prepare/Execute Write and Signed Writes on the server side.** The server
-  refuses both with `request not supported` — legal, but it means a client
-  cannot write a value longer than MTU−3 to it.
+- **Signed Writes.** Verifying one needs a CSRK, which is distributed by
+  bonding, which needs SMP. Until that exists the only honest thing to do with
+  a signed write is ignore it — and since it is a command, silence is also the
+  protocol-correct way to not support it. Accepting one unverified would be
+  worse than refusing.
 
 **Two transports, one ATT layer.** `att-send` and `att-recv` dispatch on
 whether the channel is an integer fd (a kernel L2CAP socket) or an `hci-conn`,
