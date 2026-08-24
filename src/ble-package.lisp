@@ -253,6 +253,26 @@
           *coc-default-mtu*
           *coc-default-mps*
           *coc-default-credits*
+          ;; Security Manager (src/smp.lisp, src/smp-crypto.lisp)
+          smp-pair
+          smp-session
+          smp-session-p
+          smp-session-ltk
+          smp-session-mackey
+          smp-start-encryption
+          smp-answer-ltk-request
+          smp-await-encryption
+          smp-error
+          smp-error-reason
+          smp-random
+          smp-f4
+          smp-f5
+          smp-f6
+          smp-g2
+          smp-generate-keypair
+          smp-dhkey
+          aes-cmac
+          msb
           ;; Giving the adapter back (src/teardown.lisp)
           *open-att-channels*
           register-att-channel

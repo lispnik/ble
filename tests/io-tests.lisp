@@ -1326,3 +1326,96 @@ somebody else's octets into our stream."
             (ble:l2cap-coc-send coc (ble:make-octets 513) :timeout-ms 0))
         "the peer advertised an MTU of 512; sending more is a protocol error,
 not something to discover from the far end going quiet")))
+
+;;; --- the Security Manager's crypto --------------------------------------
+
+(test aes-cmac-matches-the-published-vectors
+  "RFC 4493. Everything SMP derives is AES-CMAC underneath, so if this is
+wrong nothing above it can be right -- and a wrong CMAC still produces
+plausible-looking 16-octet values that agree with themselves."
+  (let ((key (hex->octets "2b7e151628aed2a6abf7158809cf4f3c")))
+    (is (equalp (hex->octets "bb1d6929e95937287fa37d129b756746")
+                (ble:aes-cmac key #()))
+        "the empty message")
+    (is (equalp (hex->octets "070a16b46b4d4144f79bdd9dd04a287c")
+                (ble:aes-cmac key (hex->octets "6bc1bee22e409f96e93d7e117393172a")))
+        "one full block")
+    (is (equalp (hex->octets "dfa66747de9ae63030ca32611497c827")
+                (ble:aes-cmac key (hex->octets "6bc1bee22e409f96e93d7e117393172a~
+                                                ae2d8a571e03ac9c9eb76fac45af8e51~
+                                                30c81c46a35ce411")))
+        "a message needing padding")))
+
+(test msb-reverses-exactly-once
+  "Wire order and crypto order differ, and every value crosses that boundary
+once. Applying the reversal twice is the same as not applying it, which is
+the shape the bug takes."
+  (let ((v (hex->octets "0102030405")))
+    (is (equalp (hex->octets "0504030201") (ble:msb v)))
+    (is (equalp v (ble:msb (ble:msb v))) "twice is identity")))
+
+(test f4-depends-on-every-input
+  "Structural, not a published vector: each argument must reach the result,
+because a confirm value that ignores one of them would still match on both
+sides and still be wrong."
+  (let* ((u (ble:make-octets 32)) (v (ble:make-octets 32))
+         (x (ble:make-octets 16))
+         (base (ble:smp-f4 u v x 0)))
+    (is (= 16 (length base)) "a confirm value is 16 octets")
+    (is (equalp base (ble:smp-f4 u v x 0)) "and is deterministic")
+    (let ((u2 (copy-seq u))) (setf (aref u2 0) 1)
+      (is (not (equalp base (ble:smp-f4 u2 v x 0))) "U reaches the result"))
+    (let ((v2 (copy-seq v))) (setf (aref v2 31) 1)
+      (is (not (equalp base (ble:smp-f4 u v2 x 0))) "V reaches the result"))
+    (let ((x2 (copy-seq x))) (setf (aref x2 0) 1)
+      (is (not (equalp base (ble:smp-f4 u v x2 0))) "the nonce reaches it"))
+    (is (not (equalp base (ble:smp-f4 u v x 1))) "and so does Z")))
+
+(test f5-derives-two-different-keys-from-one-secret
+  "The counter octet is what separates the MacKey from the LTK. Without it
+they would be identical, and the check values would be computed with the
+very key they are supposed to be protecting."
+  (let ((dh (ble:make-octets 32)) (n1 (ble:make-octets 16))
+        (n2 (ble:make-octets 16)) (a1 (ble:make-octets 7))
+        (a2 (ble:make-octets 7)))
+    (multiple-value-bind (mackey ltk) (ble:smp-f5 dh n1 n2 a1 a2)
+      (is (= 16 (length mackey)))
+      (is (= 16 (length ltk)))
+      (is (not (equalp mackey ltk)) "they must not be the same key"))
+    ;; the addresses are bound into the key, which is what stops one derived
+    ;; on one pair of devices being replayed against another
+    (let ((a1b (copy-seq a1)))
+      (setf (aref a1b 3) #xAA)
+      (is (not (equalp (nth-value 1 (ble:smp-f5 dh n1 n2 a1 a2))
+                       (nth-value 1 (ble:smp-f5 dh n1 n2 a1b a2))))
+          "changing an address changes the LTK"))))
+
+(test f5-is-not-symmetric-in-its-nonces
+  "Na and Nb are not interchangeable; if they were, a reflected transcript
+would derive the same key."
+  (let ((dh (ble:make-octets 32)) (a (ble:make-octets 7)))
+    (let ((n1 (ble:make-octets 16)) (n2 (ble:make-octets 16)))
+      (setf (aref n1 0) 1 (aref n2 0) 2)
+      (is (not (equalp (nth-value 1 (ble:smp-f5 dh n1 n2 a a))
+                       (nth-value 1 (ble:smp-f5 dh n2 n1 a a))))))))
+
+(test f6-and-g2-produce-the-right-shapes
+  (let ((k (ble:make-octets 16)) (n (ble:make-octets 16))
+        (r (ble:make-octets 16)) (io (ble:make-octets 3))
+        (a (ble:make-octets 7)) (u (ble:make-octets 32)))
+    (is (= 16 (length (ble:smp-f6 k n n r io a a))) "a check value is 16 octets")
+    (let ((digits (ble:smp-g2 u u n n)))
+      (is (integerp digits))
+      (is (< digits 1000000) "numeric comparison shows six digits"))))
+
+(test p256-shared-secrets-agree-from-both-sides
+  "The property that makes ECDH ECDH. Done in software because the RTL8761B
+controllers here answer LE Generate DHKey with a fixed public key and a
+shared secret that is neither correct nor stable."
+  (multiple-value-bind (a-priv a-x a-y) (ble:smp-generate-keypair)
+    (multiple-value-bind (b-priv b-x b-y) (ble:smp-generate-keypair)
+      (is (= 32 (length a-x)) "coordinates are 32 octets")
+      (is (not (equalp a-x b-x)) "and two keypairs differ")
+      (is (equalp (ble:smp-dhkey a-priv b-x b-y)
+                  (ble:smp-dhkey b-priv a-x a-y))
+          "each side computes the same shared secret from the other's key"))))

@@ -147,6 +147,47 @@ the ones asked for — the peer may answer anywhere inside the range. Using the
 requested numbers afterwards is how a link ends up being driven at an interval
 it is not running at.
 
+## Pairing and encryption
+
+`smp-pair` runs LE Secure Connections over an established link and returns a
+session whose LTK is ready to use; `smp-start-encryption` (central) and
+`smp-answer-ltk-request` (peripheral) turn that key into an encrypted link.
+Both roles are implemented.
+
+**Scope, because the omissions matter.** Secure Connections only — legacy
+(4.0/4.1) pairing is not here, and its Just Works variant offers no protection
+against a passive eavesdropper at all. Just Works association only: the
+exchange for numeric comparison is identical, and what is missing is a way to
+show a user six digits and ask, which is a UI question this library should not
+answer (`smp-g2` is implemented, so that path is short). No key distribution —
+Secure Connections derives the LTK on both sides, so nothing needs sending for
+encryption, but IRK and CSRK are not exchanged.
+
+**Just Works gives no MITM protection.** An attacker present during pairing
+can be both ends of it. It defends against passive eavesdropping and nothing
+more. That is a limit, not a footnote.
+
+**The ECDH is in software, and not by preference.** These RTL8761B controllers
+answer `LE Read Local P-256 Public Key` with the *same* key across separate
+processes, and `LE Generate DHKey` with a value that is visibly not a random
+32 octets — then return nothing at all on the second and third call. A
+silently wrong shared secret is the worst failure mode pairing has, so this
+uses ironclad's P-256 rather than the controller. AES-CMAC is ironclad's too;
+the controller's AES-128 was verified correct against the FIPS-197 vector, but
+having both in one place is worth more than saving the round trips.
+
+**What is verified, and what is not.** RFC 4493 vectors cover AES-CMAC, and
+`smp-dhkey` is checked for the property that makes ECDH work — both sides
+reaching the same secret. Over two radios, an initiator and a responder in
+separate processes derive a byte-identical LTK and the controllers report the
+link encrypted. But **both ends are this code**, so agreement demonstrates
+internal consistency rather than conformance: a systematically wrong `f5`
+would agree with itself. Interop against an independent stack is the proof
+that is missing. It was attempted against BlueZ three ways and none completed
+— the Pi's built-in radio fails to scan with an I/O error, and both
+`bluetoothctl` and `btmgmt` runs died without connecting. **Treat spec
+conformance as unproven until a third-party peer pairs with this.**
+
 ## Streams: connection-oriented channels
 
 `l2cap-coc-connect`, `l2cap-coc-listen` / `l2cap-coc-accept`,
@@ -256,8 +297,6 @@ box to run on, which is the trade being made rather than a gap to close.
 
 Not implemented:
 
-- **SMP** — no pairing, bonding or encryption, so this cannot talk to a peer
-  that requires a bonded link. The largest remaining gap by a distance.
 - **LE privacy** (resolving list, RPA) and the controller filter-accept-list.
 - **Read Multiple Variable Length** (0x20, from 5.2), refused as unsupported.
   Older Read Multiple returns values concatenated with no delimiters, so a

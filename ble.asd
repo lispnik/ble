@@ -31,7 +31,11 @@
   :description "Generic Bluetooth Low Energy over raw BlueZ sockets (Linux only)."
   :license     "MIT"
   :version     "0.2.0"
-  :depends-on  (#:ble/core #:cffi)
+  ;; ironclad is for the Security Manager: AES-CMAC, and P-256 in software
+  ;; because the controllers here answer LE Generate DHKey with garbage.
+  ;; ble/core stays dependency-free, which is what keeps consumers' protocol
+  ;; tests runnable on a machine with no Bluetooth.
+  :depends-on  (#:ble/core #:cffi #:ironclad)
   :components ((:module "src"
                 :components ((:file "ble-package")
                              (:file "ffi"        :depends-on ("ble-package"))
@@ -44,6 +48,8 @@
                              (:file "conn-params" :depends-on ("hci-conn"))
                              (:file "l2cap-signalling" :depends-on ("conn-params"))
                              (:file "l2cap-coc" :depends-on ("l2cap-signalling"))
+                             (:file "smp-crypto" :depends-on ("ble-package"))
+                             (:file "smp" :depends-on ("smp-crypto" "hci-conn"))
                              (:file "teardown"   :depends-on ("hci-conn"))
                              ;; last: wraps acquire/release pairs from all of
                              ;; the above

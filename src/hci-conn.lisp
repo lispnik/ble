@@ -174,7 +174,8 @@ floor along with every other non-ATT CID."
   (sig-results '())
   ;; Connection-oriented channels, keyed by the CID we allocated for each,
   ;; plus the SPSMs we accept and the channels a peer has opened to them.
-  (coc-channels '()) (coc-listeners '()) (coc-incoming '()) (coc-next-cid #x0040))
+  (coc-channels '()) (coc-listeners '()) (coc-incoming '()) (coc-next-cid #x0040)
+  (smp-pending '()))
 
 (defun %await-le-connection (sock opcode timeout-ms)
   "Wait up to TIMEOUT-MS (a wall-clock deadline) for the (Enhanced)
@@ -340,6 +341,10 @@ connection parameter requests on CID 0x0005 -- so the framing is shared."
   "Send an ATT PDU on the ATT CID."
   (hci-acl-send-l2cap conn +att-cid+ pdu))
 
+(defvar *l2cap-smp-frame-handler* nil
+  "Called with (CONN FRAME) for Security Manager PDUs on CID 0x0006. Set by
+src/smp.lisp.")
+
 (defvar *l2cap-coc-frame-handler* nil
   "Called with (CONN CID FRAME) for data on a dynamic CID. Set by
 src/l2cap-coc.lisp; a hook for the same reason the signalling one is.")
@@ -392,6 +397,8 @@ when losing it costs the most."
             ((= cid +l2cap-sig-cid+)
              (setf (hci-conn-sig-pending conn)
                    (nconc (hci-conn-sig-pending conn) (list frame))))
+            ((and *l2cap-smp-frame-handler* (= cid #x0006))
+             (funcall *l2cap-smp-frame-handler* conn frame))
             ;; A dynamic CID belongs to a connection-oriented channel. The
             ;; hook keeps this file from having to know how one works.
             ((and *l2cap-coc-frame-handler* (>= cid #x0040))

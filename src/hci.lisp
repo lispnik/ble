@@ -140,12 +140,19 @@ behaviour and still what an endless scan loop wants."
                             (%strerror (errno)) (errno)))
             (t (foreign-to-bytes buf n))))))
 
-(defun hci-read-bd-addr (&key (dev 0))
-  "Read the local BD_ADDR of hci<DEV> via the HCI Read_BD_ADDR command.
-Returns a 6-byte octet vector in on-air byte order (LSB first) -- exactly
-the form needed to bind an L2CAP source address to this adapter."
-  (let ((sock (open-hci-socket :dev dev))
-        (opcode (hci-opcode +ogf-info-params+ +ocf-read-bd-addr+)))
+(defun hci-read-bd-addr (&key (dev 0) sock)
+  "Read the local BD_ADDR via the HCI Read_BD_ADDR command. Returns a 6-byte
+octet vector in on-air byte order (LSB first) -- exactly the form needed to
+bind an L2CAP source address to this adapter.
+
+SOCK uses a socket the caller already holds instead of opening one on
+hci<DEV>. That is not merely an optimisation: once an adapter has been taken
+with HCI_CHANNEL_USER the kernel has no access to it, so the DEV path cannot
+reach it at all, and a peripheral needs its own address to pair -- f5 and f6
+bind the keys to both addresses."
+  (let* ((own-socket (null sock))
+         (sock (or sock (open-hci-socket :dev dev)))
+         (opcode (hci-opcode +ogf-info-params+ +ocf-read-bd-addr+)))
     (unwind-protect
          (progn
            (send-hci-command sock +ogf-info-params+ +ocf-read-bd-addr+ #())
@@ -167,7 +174,8 @@ the form needed to bind an L2CAP source address to this adapter."
                                  dev status))
                         (return (subseq pkt 7 13))))
                  finally (error "no response to Read_BD_ADDR on hci~D" dev)))
-      (close-hci-socket sock))))
+      ;; Only close what we opened; a caller's socket is not ours to shut.
+      (when own-socket (close-hci-socket sock)))))
 
 (defun hci-set-default-phy (&key (dev 0) (tx-phys #x05) (rx-phys #x05))
   "Issue HCI LE Set Default PHY on hci<DEV>. TX-PHYS / RX-PHYS are bitmasks
