@@ -707,3 +707,321 @@ timeouts against a peer that was never going to speak."
     (handler-case (progn (ble:att-subscribe chan #x000D)
                          (is nil "should have signalled"))
       (ble:att-error (e) (is (= 2 (ble:att-error-code e)))))))
+
+;;; --- the GATT server, driven by this library's own client ---------------
+;;;
+;;; These wire the two halves together in one image: the client's att-send is
+;;; handed to the server, and whatever the server sends back becomes the
+;;; client's inbox. No radio, and every request the client knows how to make
+;;; gets answered by the server under test -- which is a far better exercise
+;;; of both than a hand-written list of expected octets, because the two sides
+;;; were written to the spec independently rather than to each other.
+
+(defstruct (loopback (:constructor %make-loopback))
+  client server-chan server)
+
+(defun make-loopback (server)
+  (let ((srv (ble:make-att-test-channel)))
+    (%make-loopback
+     :server server :server-chan srv
+     :client (ble:make-att-test-channel
+              :responder
+              (lambda (pdu)
+                (setf (ble:att-test-channel-sent srv) '())
+                (ble:gatt-serve-pdu server srv pdu)
+                (reverse (ble:att-test-channel-sent srv)))))))
+
+(defun deliver-server-traffic (lb)
+  "Move anything the server sent unprompted (notifications) to the client."
+  (let ((srv (loopback-server-chan lb)))
+    (setf (ble:att-test-channel-inbox (loopback-client lb))
+          (append (ble:att-test-channel-inbox (loopback-client lb))
+                  (reverse (ble:att-test-channel-sent srv)))
+          (ble:att-test-channel-sent srv) '())))
+
+(defun demo-server ()
+  "Two services, a static value, a computed one, a writable one, and a
+notifying characteristic -- i.e. one of each thing a server has to get right."
+  (let ((server (ble:make-gatt-server :mtu 247))
+        (counter 0))
+    (ble:gatt-add-service server #x180A)                 ; Device Information
+    (ble:gatt-add-characteristic server :uuid #x2A29 :properties '(:read)
+                                        :value "ACME")   ; manufacturer
+    (ble:gatt-add-characteristic server :uuid #x2A24 :properties '(:read)
+                                        :on-read (lambda (s a)
+                                                   (declare (ignore s a))
+                                                   (format nil "n=~D" (incf counter))))
+    (ble:gatt-add-service server #xFFE0)                 ; a vendor service
+    (multiple-value-bind (value-handle cccd-handle)
+        (ble:gatt-add-characteristic server :uuid #xFFE1
+                                     :properties '(:read :write :notify)
+                                     :value #(1 2 3))
+      ;; Return the handles the server assigned rather than deriving them --
+      ;; a characteristic occupies two attributes or three depending on
+      ;; whether it notifies, so arithmetic on a neighbour's handle addresses
+      ;; a declaration about as often as it addresses a value.
+      (let ((ffe2 (ble:gatt-add-characteristic
+                   server :uuid #xFFE2 :properties '(:write)
+                          :on-write (lambda (s a v)
+                                      (declare (ignore s a))
+                                      ;; refuse anything but one octet
+                                      (unless (= 1 (length v)) #x0D))))
+            (ffe3 (ble:gatt-add-characteristic
+                   server :uuid #xFFE3 :properties '())))
+        (values server value-handle cccd-handle ffe2 ffe3)))))
+
+(test the-server-lays-out-handles-the-way-gatt-requires
+  "A characteristic's declaration must sit immediately before its value, and
+its CCCD immediately after. Getting this wrong makes discovery return a
+database that reads plausibly and points at the wrong attributes."
+  (multiple-value-bind (server value-handle cccd-handle) (demo-server)
+    (let ((decl (ble:gatt-find-attribute server (1- value-handle))))
+      (is (equalp (ble:uuid16 #x2803) (ble:gatt-attribute-uuid decl))
+          "the attribute before the value is the declaration")
+      (is (= value-handle (ble:u16-le (ble:gatt-attribute-value decl) 1))
+          "and the declaration points at the value handle"))
+    (is (= cccd-handle (1+ value-handle)) "the CCCD follows the value")
+    (is (equalp (ble:uuid16 #x2902)
+                (ble:gatt-attribute-uuid (ble:gatt-find-attribute server cccd-handle))))))
+
+(test the-client-discovers-the-services-the-server-declares
+  (let* ((lb (make-loopback (demo-server)))
+         (services (ble:att-discover-services (loopback-client lb))))
+    (is (= 2 (length services)) "both services found")
+    (is (equalp '("180A" "FFE0")
+                (mapcar #'ble:gatt-service-uuid-string services))
+        "with the UUIDs declared, in handle order")
+    ;; the second service's range must cover its characteristics
+    (let ((vendor (second services)))
+      (is (> (ble:gatt-service-end vendor) (ble:gatt-service-start vendor))
+          "a service with characteristics spans more than one handle"))))
+
+(test find-service-answers-in-one-round-trip
+  "Find By Type Value is the single-exchange form; ATT-FIND-SERVICE uses it."
+  (let ((lb (make-loopback (demo-server))))
+    (let ((svc (ble:att-find-service (loopback-client lb) (ble:uuid16 #xFFE0))))
+      (is-true svc "the vendor service is found by UUID")
+      (is (equalp "FFE0" (ble:gatt-service-uuid-string svc))))
+    (is (null (ble:att-find-service (loopback-client lb) (ble:uuid16 #x1234)))
+        "and a UUID that is not there returns NIL, not a wrong service")))
+
+(test the-client-discovers-characteristics-and-their-properties
+  (multiple-value-bind (server value-handle) (demo-server)
+    (let* ((lb (make-loopback server))
+           (chars (ble:att-discover-characteristics (loopback-client lb))))
+      (is (= 5 (length chars)) "every characteristic in the database")
+      (let ((ffe1 (ble:find-char-by-uuid chars (ble:uuid16 #xFFE1))))
+        (is-true ffe1 "FFE1 is discoverable")
+        (is (= value-handle (ble:gatt-char-handle ffe1))
+            "and its value handle is the one the server assigned")
+        (let ((props (ble:gatt-char-property-names ffe1)))
+          (is (and (member :read props) (member :write props)
+                   (member :notify props))
+              "with the properties it was declared with"))))))
+
+(test descriptor-discovery-finds-the-cccd
+  (multiple-value-bind (server value-handle cccd-handle) (demo-server)
+    (let* ((lb (make-loopback server))
+           (found (ble:att-find-cccd (loopback-client lb) value-handle)))
+      (is (= cccd-handle found)
+          "att-find-cccd must land on the descriptor the server laid down"))))
+
+(test reads-static-computed-and-refused
+  (multiple-value-bind (server value-handle cccd ffe2 ffe3) (demo-server)
+    (declare (ignore cccd ffe2))
+    (let ((lb (make-loopback server)))
+      (is (equalp (map 'vector #'char-code "ACME")
+                  (ble:att-read-value (loopback-client lb) 3))
+          "a static value comes back verbatim")
+      (is (equalp #(1 2 3) (ble:att-read-value (loopback-client lb) value-handle)))
+      ;; the computed one increments every time it is read
+      (let ((a (ble:att-read-value (loopback-client lb) 5))
+            (b (ble:att-read-value (loopback-client lb) 5)))
+        (is (not (equalp a b))
+            "an on-read characteristic is evaluated per read, not once"))
+      ;; FFE3 was declared with no properties at all
+      (multiple-value-bind (value err)
+          (ble:att-read-value (loopback-client lb) ffe3)
+        (is (null value) "a read of an unreadable attribute yields no value")
+        (is (= #x02 err) "and reports read-not-permitted")))))
+
+(test an-invalid-handle-is-reported-as-such
+  (let ((lb (make-loopback (demo-server))))
+    (multiple-value-bind (value err)
+        (ble:att-read-value (loopback-client lb) #x0FFF)
+      (is (null value))
+      (is (= #x01 err) "invalid handle, not attribute-not-found"))))
+
+(test writes-are-stored-refused-or-vetoed-by-the-hook
+  (multiple-value-bind (server value-handle cccd ffe2) (demo-server)
+    (declare (ignore cccd))
+    (let ((lb (make-loopback server)))
+      (is (eq t (ble:att-write-value (loopback-client lb) value-handle #(9 9)))
+          "a permitted write is acknowledged")
+      (is (equalp #(9 9) (ble:att-read-value (loopback-client lb) value-handle))
+          "and the value is what a later read returns")
+      ;; FFE2 has an on-write hook that refuses anything but one octet
+      (is (= #x0D (ble:att-write-value (loopback-client lb) ffe2 #(1 2 3)))
+          "the hook's error code is what the client sees")
+      (is (eq t (ble:att-write-value (loopback-client lb) ffe2 #(7)))
+          "and a write it accepts is acknowledged")
+      ;; a read-only attribute
+      (is (= #x03 (ble:att-write-value (loopback-client lb) 3 #(1)))
+          "write-not-permitted on a read-only characteristic"))))
+
+(test a-write-command-stores-without-answering
+  (multiple-value-bind (server value-handle) (demo-server)
+    (let ((lb (make-loopback server)))
+      (ble:att-write-command (loopback-client lb) value-handle #(4 2))
+      (is (equalp #(4 2) (ble:att-read-value (loopback-client lb) value-handle))
+          "the value must land even though nothing was sent back"))))
+
+(test mtu-exchange-settles-on-the-smaller-of-the-two
+  (let* ((server (ble:make-gatt-server :mtu 247))
+         (lb (make-loopback server))
+         (ble:*att-rx-mtu* 100))
+    (ble:att-exchange-mtu (loopback-client lb) 60)
+    (is (= 60 (ble:gatt-server-mtu server))
+        "the server must use the client's smaller number, not its own")))
+
+(test an-unsupported-request-is-refused-not-ignored
+  (let* ((lb (make-loopback (demo-server)))
+         (chan (loopback-client lb)))
+    ;; 0x16 Prepare Write Request: this server does not implement it
+    (let ((rsp (ble:att-request chan (hex->octets "16" "0300" "0000" "AA"))))
+      (is-true (ble:att-error-p rsp) "an Error Response must come back")
+      (is (= #x06 (aref rsp 4)) "request not supported"))))
+
+(test the-wrong-group-type-is-refused-rather-than-answered-empty
+  "A client must be able to tell 'no services there' from 'that is not a
+group type', which an empty answer cannot express."
+  (let* ((lb (make-loopback (demo-server)))
+         (req (ble:make-octets 7)))
+    (setf (aref req 0) #x10)
+    (ble:u16le-put req 1 1)
+    (ble:u16le-put req 3 #xFFFF)
+    (ble:u16le-put req 5 #x2803)          ; not a group type
+    (let ((rsp (ble:att-request (loopback-client lb) req)))
+      (is-true (ble:att-error-p rsp))
+      (is (= #x10 (aref rsp 4)) "unsupported group type"))))
+
+(test notifications-only-after-the-client-subscribes
+  (multiple-value-bind (server value-handle cccd-handle) (demo-server)
+    (let* ((lb (make-loopback server))
+           (chan (loopback-client lb))
+           (srv (loopback-server-chan lb)))
+      (is (null (ble:gatt-notify server srv value-handle #(1)))
+          "sending before subscription is a protocol violation, so refuse it")
+      (is-false (ble:gatt-subscribed-p server cccd-handle))
+      (ble:att-subscribe chan cccd-handle)
+      (is-true (ble:gatt-subscribed-p server cccd-handle)
+               "the CCCD write is the subscription")
+      (is-true (ble:gatt-notify server srv value-handle #(7 7))
+               "and now a notification is allowed")
+      (deliver-server-traffic lb)
+      (is (equalp #(7 7) (ble:att-next-notification chan value-handle 50))
+          "which the client receives on the value handle"))))
+
+(test indications-need-their-own-bit
+  (multiple-value-bind (server value-handle cccd-handle) (demo-server)
+    (let* ((lb (make-loopback server))
+           (chan (loopback-client lb))
+           (srv (loopback-server-chan lb)))
+      (ble:att-subscribe chan cccd-handle)          ; notifications only
+      (is-false (ble:gatt-subscribed-p server cccd-handle :indications t)
+                "subscribing to notifications must not enable indications")
+      (ble:att-subscribe chan cccd-handle :indications t)
+      (is-true (ble:gatt-subscribed-p server cccd-handle :indications t))
+      (is-true (ble:gatt-notify server srv value-handle #(5) :indications t))
+      (deliver-server-traffic lb)
+      (is (equalp #(5) (ble:att-next-notification chan value-handle 50))
+          "an indication reaches the client through the same call")
+      (is (find #x1E (ble:att-test-channel-sent-pdus chan)
+                :key (lambda (p) (aref p 0)))
+          "and the client confirms it"))))
+
+(test a-long-value-survives-the-round-trip
+  "Read Blob plus reassembly: the server must serve offsets and the client
+must stitch them, and a small MTU is what forces both."
+  (let* ((server (ble:make-gatt-server :mtu 23))
+         (blob (ble:make-octets 60)))
+    (dotimes (i 60) (setf (aref blob i) i))
+    (ble:gatt-add-service server #xFFE0)
+    (let ((h (ble:gatt-add-characteristic server :uuid #xFFE1
+                                                 :properties '(:read)
+                                                 :value blob)))
+      (let ((lb (make-loopback server)))
+        (is (equalp blob (ble:att-read-long-value (loopback-client lb) h))
+            "every octet, in order, across several reads")))))
+
+(test read-multiple-concatenates-in-request-order
+  (multiple-value-bind (server value-handle) (demo-server)
+    (let ((lb (make-loopback server)))
+      (is (equalp (concatenate 'vector (map 'vector #'char-code "ACME") #(1 2 3))
+                  (ble:att-read-multiple (loopback-client lb)
+                                         (list 3 value-handle)))
+          "values arrive back to back, in the order asked for"))))
+
+;;; --- resource-safe wrappers ---------------------------------------------
+
+(test with-att-channel-closes-on-a-normal-exit
+  (let ((chan (inbox-channel (ntf #x0010 "AA"))))
+    (ble:with-att-channel (c chan)
+      (ble:att-next-notification c #x0099 1))       ; queues, claims nothing
+    (is (zerop (ble:att-pending-notifications chan))
+        "closing must drop the channel's notification backlog")))
+
+(test with-att-channel-closes-on-a-nonlocal-exit
+  "The reason these macros exist: an HCI_CHANNEL_USER socket that escapes
+cleanup holds the adapter away from the whole machine."
+  (let ((chan (inbox-channel (ntf #x0010 "AA"))))
+    (ignore-errors
+     (ble:with-att-channel (c chan)
+       (ble:att-next-notification c #x0099 1)
+       (error "boom")))
+    (is (zerop (ble:att-pending-notifications chan))
+        "cleanup must have run even though the body threw")))
+
+(test the-server-never-answers-a-command-even-when-refusing-it
+  "A Write Command carries no response, so refusing one with an Error Response
+would itself be a protocol error -- the client is not waiting for anything and
+would read the error as the answer to whatever it asked next."
+  (multiple-value-bind (server) (demo-server)
+    (let* ((srv (ble:make-att-test-channel))
+           ;; handle 3 is read-only, so this write must be refused
+           (cmd (let ((p (ble:make-octets 4)))
+                  (setf (aref p 0) #x52)
+                  (ble:u16le-put p 1 3)
+                  (setf (aref p 3) #xAA)
+                  p)))
+      (ble:gatt-serve-pdu server srv cmd)
+      (is (null (ble:att-test-channel-sent srv))
+          "nothing at all may go back for a command"))))
+
+(test a-signed-write-is-dropped-rather-than-refused
+  "Also a command by opcode. Unimplemented, but silence is the correct way to
+not implement it."
+  (multiple-value-bind (server) (demo-server)
+    (let ((srv (ble:make-att-test-channel))
+          (pdu (ble:make-octets 16)))
+      (setf (aref pdu 0) #xD2)            ; Signed Write Command
+      (ble:u16le-put pdu 1 3)
+      (ble:gatt-serve-pdu server srv pdu)
+      (is (null (ble:att-test-channel-sent srv))
+          "no Error Response for an opcode with the command bit set"))))
+
+(test the-server-truncates-a-value-to-the-negotiated-mtu
+  "Answering with more than the client agreed to receive gets the response
+dropped by the client, which looks like a server that did not answer."
+  (let ((server (ble:make-gatt-server :mtu 23))
+        (blob (ble:make-octets 100)))
+    (ble:gatt-add-service server #xFFE0)
+    (let ((h (ble:gatt-add-characteristic server :uuid #xFFE1
+                                                 :properties '(:read)
+                                                 :value blob)))
+      (let* ((lb (make-loopback server))
+             (value (ble:att-read-value (loopback-client lb) h)))
+        (is (= 22 (length value))
+            "a plain read yields at most MTU-1 octets")
+        (is (ble:value-may-be-truncated-p value 23)
+            "and the client can tell that it was truncated")))))

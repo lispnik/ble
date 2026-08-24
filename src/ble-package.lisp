@@ -41,6 +41,7 @@
           hci-socket-p
           hci-socket-fd
           hci-socket-dev
+          hci-socket-acl-len
           send-hci-command
           read-hci-packet
           hci-read-bd-addr
@@ -168,6 +169,42 @@
           hci-conn
           hci-conn-handle
           hci-conn-close
+          ;; GATT server: the attribute database and the half of ATT that
+          ;; answers requests (src/gatt-server.lisp)
+          make-gatt-server
+          gatt-server
+          gatt-server-p
+          gatt-server-mtu
+          gatt-server-services
+          gatt-add-service
+          gatt-add-characteristic
+          gatt-attribute
+          gatt-attribute-p
+          gatt-attribute-handle
+          gatt-attribute-uuid
+          gatt-attribute-value
+          gatt-attribute-permissions
+          gatt-attribute-read
+          gatt-attribute-count
+          gatt-find-attribute
+          gatt-set-value
+          gatt-service-entry
+          gatt-service-entry-start
+          gatt-service-entry-end
+          gatt-service-entry-uuid
+          gatt-serve
+          gatt-serve-pdu
+          gatt-notify
+          gatt-subscribed-p
+          char-properties-bitmap
+          ;; Resource-safe wrappers (src/with.lisp)
+          with-hci-socket
+          with-hci-user-socket
+          with-att-channel
+          with-nus
+          with-nus-hci
+          with-extended-scan
+          with-advertising
           ;; Giving the adapter back (src/teardown.lisp)
           *open-att-channels*
           register-att-channel

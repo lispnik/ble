@@ -48,7 +48,15 @@
 
 ;;; HCI socket -----------------------------------------------------------
 
-(defstruct hci-socket fd dev)
+(defstruct hci-socket
+  "An open HCI socket: its fd, which adapter it is bound to, and the
+controller's ACL data length once known.
+
+ACL-LEN is kept here rather than only returned from OPEN-HCI-USER-SOCKET
+because it is a property of the controller, and anything that wraps the
+constructor -- WITH-HCI-USER-SOCKET, for one -- would otherwise drop it and
+leave the caller unable to fragment correctly."
+  fd dev acl-len)
 
 (defun %hci-filter-bytes ()
   "The 16-octet struct hci_filter that lets every event packet through.

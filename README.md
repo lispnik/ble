@@ -81,6 +81,55 @@ every one of those paths used to discard them. A subscriber could lose an
 arbitrary number of readings to an unrelated request running concurrently, and
 nothing reported it.
 
+## Being the peripheral: the GATT server
+
+`src/gatt-server.lisp` is the other direction — an attribute database, and the
+half of ATT that answers requests rather than making them.
+
+```lisp
+(let ((server (ble:make-gatt-server)))
+  (ble:gatt-add-service server #x180A)
+  (ble:gatt-add-characteristic server :uuid #x2A29 :properties '(:read)
+                                      :value "ACME")
+  (ble:gatt-add-service server #xFFE0)
+  (multiple-value-bind (value-handle cccd-handle)
+      (ble:gatt-add-characteristic server :uuid #xFFE1
+                                   :properties '(:read :write :notify)
+                                   :on-read (lambda (s a) (declare (ignore s a))
+                                              (current-reading)))
+    (loop (ble:gatt-serve server chan :timeout-ms 100)
+          (ble:gatt-notify server chan value-handle (current-reading)
+                           :cccd-handle cccd-handle))))
+```
+
+Handles are allocated as the database is built, which is the order GATT
+requires anyway: a characteristic's declaration must sit immediately before
+its value and its descriptors immediately after. Laying that out by hand is
+where a server usually goes wrong, so `gatt-add-characteristic` writes all
+three attributes — declaration, value, and a CCCD when the characteristic
+notifies — and hands back the handles it assigned rather than making you
+derive them.
+
+It answers Exchange MTU, Find Information, Find By Type Value, Read By Type,
+Read By Group Type, Read, Read Blob, Read Multiple, Write and Write Command,
+and refuses anything else with `request not supported`. `on-read` computes a
+value at the moment it is asked for, which is what a sensor characteristic
+wants; `on-write` returns an ATT error code to refuse a write. `gatt-notify`
+declines to send unless the client has actually subscribed — sending anyway is
+a protocol violation, and it reaches the client as traffic it never asked for.
+
+## Resource-safe wrappers
+
+`with-hci-socket`, `with-hci-user-socket`, `with-att-channel`, `with-nus`,
+`with-nus-hci`, `with-extended-scan`, `with-advertising`. Each releases on
+every exit path, including a nonlocal one.
+
+`with-hci-user-socket` is the one that earns its keep. Between the bind and
+the release the kernel has no access to that controller, so an escaping error
+that skipped the release leaves the adapter down for *every* program on the
+machine — recoverable only with `hciconfig hciN up` as root. Both consumers
+had written their own version of these before they lived here.
+
 ## Conditions
 
 Everything this library signals inherits from `ble-error`, so one handler
@@ -110,20 +159,21 @@ timeouts against a peer that was never going to speak.
 
 Long and batched access: `att-read-long-value` and `att-read-multiple`,
 `att-prepare-write` / `att-execute-write`, and `att-write-long-value` for a
-value larger than MTU−3. These are exercised by the test suite but not against
-hardware — neither consumer has an attribute long enough to need them.
+value larger than MTU−3. The read side is exercised over real radios by
+`tools/live-two-radios/`, whose server offers a 300-octet characteristic
+behind a 23-octet MTU; the long *write* is still suite-only, since neither
+consumer has a writable attribute that big.
 
 Not implemented:
 
 - **SMP** — no pairing, bonding or encryption, so this cannot talk to a peer
-  that requires a bonded link. The largest single gap.
-- **A GATT server.** There is no attribute database, so this cannot answer
-  discovery or serve characteristics. It *can* be a peripheral at the link
-  layer — advertise connectable, accept a connection, and push notifications —
-  which is what `tools/live-two-radios/` does; what is missing is everything
-  above ATT PDUs.
+  that requires a bonded link. The largest remaining gap by a distance.
 - **Connection parameter update**, and the LE privacy features (resolving
   list, RPA) and controller filter-accept-list.
+- **L2CAP connection-oriented channels**, so no high-throughput transfers.
+- **Prepare/Execute Write and Signed Writes on the server side.** The server
+  refuses both with `request not supported` — legal, but it means a client
+  cannot write a value longer than MTU−3 to it.
 
 **Two transports, one ATT layer.** `att-send` and `att-recv` dispatch on
 whether the channel is an integer fd (a kernel L2CAP socket) or an `hci-conn`,

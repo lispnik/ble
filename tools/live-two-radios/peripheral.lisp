@@ -1,11 +1,12 @@
-;;;; Dongle A (hci1) as a PERIPHERAL that notifies on TWO handles.
+;;;; Dongle A: a real GATT server, on real hardware.
 ;;;;
-;;;; ble has no GATT server, so this is not one: it owns the controller via
-;;;; HCI_CHANNEL_USER, advertises connectable, and once a central attaches it
-;;;; pushes Handle Value Notifications on two handles and answers any request
-;;;; with an ATT Error Response. That is the whole peer surface the client
-;;;; side of this test needs, and it is a peer our own code did not write the
-;;;; client half against.
+;;;; Everything below the ATT layer is this library too -- HCI_CHANNEL_USER for
+;;;; the controller, legacy connectable advertising, and the GATT server from
+;;;; src/gatt-server.lisp answering discovery, reads, writes and subscriptions.
+;;;; The point of running it on a second radio is that central.lisp then talks
+;;;; to it over the air rather than through a loopback in one image: the ACL
+;;;; length here is 27 octets, so a 300-octet characteristic exercises L2CAP
+;;;; fragmentation and reassembly in both directions as a side effect.
 (require :asdf)
 (asdf:initialize-source-registry
  (list :source-registry (list :tree (truename "../../"))
@@ -14,20 +15,43 @@
 (in-package #:ble)
 
 (defparameter +dev+ 1)
-(defparameter +handle-a+ #x0010)
-(defparameter +handle-b+ #x0020)
-(defparameter +pairs+ 10)
+(defparameter *counter* 0)
 
-(defun ntf-pdu (handle payload)
-  (let* ((payload (coerce-octets payload))
-         (pdu (make-octets (+ 3 (length payload)))))
-    (setf (aref pdu 0) #x1B)
-    (u16le-put pdu 1 handle)
-    (replace pdu payload :start1 3)
-    pdu))
+(defun build-server ()
+  "Two services, and one of every kind of attribute a client might probe."
+  (let ((server (make-gatt-server :mtu 23))
+        (long (make-octets 300)))
+    (dotimes (i 300) (setf (aref long i) (mod i 251)))
+    (gatt-add-service server #x180A)
+    (gatt-add-characteristic server :uuid #x2A29 :properties '(:read)
+                                    :value "ACME")
+    (gatt-add-characteristic server :uuid #x2A24 :properties '(:read)
+                                    :on-read (lambda (s a)
+                                               (declare (ignore s a))
+                                               (format nil "r~D" (incf *counter*))))
+    (gatt-add-service server #xFFE0)
+    (multiple-value-bind (ffe1 cccd1)
+        (gatt-add-characteristic server :uuid #xFFE1
+                                 :properties '(:read :write :notify)
+                                 :value #(1 2 3))
+      (multiple-value-bind (ffe2 cccd2)
+          (gatt-add-characteristic server :uuid #xFFE2
+                                   :properties '(:read :notify)
+                                   :value #(0))
+        (let ((ffe3 (gatt-add-characteristic
+                     server :uuid #xFFE3 :properties '(:write)
+                            :on-write (lambda (s a v)
+                                        (declare (ignore s a))
+                                        (unless (= 1 (length v)) #x0D))))
+              (ffe4 (gatt-add-characteristic server :uuid #xFFE4
+                                             :properties '(:read)
+                                             :value long)))
+          (format t "~&[peripheral] ~D attributes; FFE1 ~D/cccd ~D, FFE2 ~D/cccd ~D, ~
+                     FFE3 ~D, FFE4 ~D~%"
+                  (gatt-attribute-count server) ffe1 cccd1 ffe2 cccd2 ffe3 ffe4)
+          (values server ffe1 cccd1 ffe2 cccd2))))))
 
 (defun await-connection (sock timeout-ms)
-  "Wait for an LE Connection Complete and return its handle."
   (let ((deadline (+ (get-internal-real-time)
                      (round (* timeout-ms internal-time-units-per-second) 1000))))
     (loop
@@ -41,66 +65,43 @@
             (force-output)
             (return (when (zerop status) (u16-le pkt 5)))))))))
 
-(let ((sock nil))
-  (unwind-protect
-       (block done
-         (multiple-value-bind (s acl-len) (open-hci-user-socket +dev+)
-           (setf sock s)
-           (format t "~&[peripheral] hci~D owned, acl-len ~D~%" +dev+ acl-len)
-           ;; connectable undirected, public own-address, 100 ms
-           (set-adv-parameters sock :adv-type +adv-ind+ :own-addr-type 0)
-           ;; AD: flags, then the complete local name "TWOHAND"
-           (set-adv-data sock (concatenate '(vector (unsigned-byte 8))
-                                           (vector 2 1 6 8 9)
-                                           (map 'vector #'char-code "TWOHAND")))
-           (set-adv-enable sock t)
-           (format t "~&[peripheral] advertising as TWOHAND~%") (force-output)
-           (let ((handle (await-connection sock 60000)))
-             (unless handle
-               (format t "~&[peripheral] no central attached~%")
-               (return-from done))
-             (let ((conn (make-hci-conn :sock sock :handle handle :acl-len acl-len)))
-               (format t "~&[peripheral] connected, handle 0x~4,'0X~%" handle)
-               (force-output)
-               ;; Alternate the two handles. A client that filters on one and
-               ;; drops the rest loses exactly half of this.
-               (dotimes (i +pairs+)
-                 (att-send conn (ntf-pdu +handle-a+ (vector (+ #xA0 i))))
-                 (att-send conn (ntf-pdu +handle-b+ (vector (+ #xB0 i))))
-                 ;; answer anything the central asks, so the client's error
-                 ;; path has a real peer to hear it from
-                 (let ((pdu (att-recv conn 120)))
-                   (when (and pdu (vectorp pdu) (plusp (length pdu))
-                              (member (aref pdu 0) '(#x12 #x0A)))
-                     (let ((err (make-octets 5)))
-                       (setf (aref err 0) #x01
-                             (aref err 1) (aref pdu 0))
-                       (u16le-put err 2 (if (>= (length pdu) 3) (u16-le pdu 1) 0))
-                       (setf (aref err 4) #x01) ; invalid handle
-                       (att-send conn err)
-                       (format t "~&[peripheral] refused request 0x~2,'0X~%"
-                               (aref pdu 0))
-                       (force-output)))))
-               (format t "~&[peripheral] sent ~D on each handle~%" +pairs+)
-               (force-output)
-               ;; Hold the link open so the client can drain its queue --
-               ;; and keep refusing requests, so its error path has a live
-               ;; peer for the whole run rather than only during the sends.
-               (dotimes (i 120)
-                 (let ((pdu (att-recv conn 250)))
-                   (when (and pdu (vectorp pdu) (plusp (length pdu))
-                              (member (aref pdu 0) '(#x12 #x0A)))
-                     (let ((err (make-octets 5)))
-                       (setf (aref err 0) #x01
-                             (aref err 1) (aref pdu 0))
-                       (u16le-put err 2 (if (>= (length pdu) 3) (u16-le pdu 1) 0))
-                       (setf (aref err 4) #x01)
-                       (att-send conn err)
-                       (format t "~&[peripheral] refused request 0x~2,'0X~%"
-                               (aref pdu 0))
-                       (force-output)))))))))
-    (when sock
-      (ignore-errors (set-adv-enable sock nil))
-      (close-hci-user-socket sock)
-      (format t "~&[peripheral] adapter handed back~%") (force-output))))
+(multiple-value-bind (server ffe1 cccd1 ffe2 cccd2) (build-server)
+  ;; with-hci-user-socket and with-advertising are the point of gap 3: the
+  ;; adapter goes back to the kernel and advertising stops however this ends.
+  (with-hci-user-socket (sock +dev+)
+    (format t "~&[peripheral] hci~D owned~%" +dev+) (force-output)
+    (set-adv-parameters sock :adv-type +adv-ind+ :own-addr-type 0)
+    (set-adv-data sock (concatenate '(vector (unsigned-byte 8))
+                                    (vector 2 1 6 8 9)
+                                    (map 'vector #'char-code "TWOHAND")))
+    (with-advertising (sock)
+      (format t "~&[peripheral] advertising as TWOHAND~%") (force-output)
+      (let ((handle (await-connection sock 90000)))
+        (if (null handle)
+            (format t "~&[peripheral] no central attached~%")
+            (let ((conn (make-hci-conn :sock sock :handle handle
+                                       :acl-len (hci-socket-acl-len sock)))
+                  (served 0) (sent 0))
+              (format t "~&[peripheral] connected, handle 0x~4,'0X~%" handle)
+              (force-output)
+              ;; Serve for a while, and notify both characteristics once the
+              ;; client subscribes. Two notifying characteristics on one link
+              ;; is what the client's per-handle dispatch has to cope with.
+              (dotimes (i 400)
+                (let ((op (gatt-serve server conn :timeout-ms 100)))
+                  (cond ((eq op :disconnected)
+                         (format t "~&[peripheral] client went away~%")
+                         (return))
+                        (op (incf served))))
+                (when (zerop (mod i 4))
+                  (when (gatt-notify server conn ffe1
+                                     (vector #xA0 (mod i 256)) :cccd-handle cccd1)
+                    (incf sent))
+                  (when (gatt-notify server conn ffe2
+                                     (vector #xB0 (mod i 256)) :cccd-handle cccd2)
+                    (incf sent))))
+              (format t "~&[peripheral] answered ~D requests, sent ~D notifications~%"
+                      served sent)
+              (force-output)))))))
+(format t "~&[peripheral] adapter handed back~%")
 (sb-ext:exit)

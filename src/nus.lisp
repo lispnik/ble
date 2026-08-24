@@ -738,7 +738,8 @@ that may be idle; this one returns as soon as anything arrives."
 an HCI-CONN whose adapter has to be handed back to the kernel."
   (unregister-att-channel chan)
   (att-clear-notifications chan)
-  (cond ((integerp chan) (%close chan))
+  (cond ((att-test-channel-p chan) nil)   ; nothing to release
+        ((integerp chan) (%close chan))
         (chan (hci-conn-close chan))))
 
 

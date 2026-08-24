@@ -39,8 +39,12 @@
                              (:file "hci"        :depends-on ("ffi"))
                              (:file "advertiser" :depends-on ("hci"))
                              (:file "nus"        :depends-on ("hci" "att-conditions"))
+                             (:file "gatt-server" :depends-on ("nus"))
                              (:file "hci-conn"   :depends-on ("nus"))
-                             (:file "teardown"   :depends-on ("hci-conn"))))))
+                             (:file "teardown"   :depends-on ("hci-conn"))
+                             ;; last: wraps acquire/release pairs from all of
+                             ;; the above
+                             (:file "with"       :depends-on ("hci-conn" "advertiser"))))))
 
 (asdf:defsystem #:ble/io-tests
   :description "Tests for the parts of the I/O layer that need no radio."

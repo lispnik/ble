@@ -1,8 +1,9 @@
-;;;; Dongle B (hci2) as the CENTRAL, using the library under test.
+;;;; Dongle B: this library as a GATT client, against the server on dongle A.
 ;;;;
-;;;; The peer notifies on two handles at once. Before the dispatch work, a
-;;;; client asking for one handle dropped every notification on the other, so
-;;;; the B column below would read 0 no matter how many were sent.
+;;;; Both halves of the library, over the air, on separate radios. Everything
+;;;; here is a real exchange: discovery walks, reads that need Read Blob and
+;;;; L2CAP reassembly to complete, a write the server's hook refuses, two
+;;;; simultaneous subscriptions, and an ATT error raised as a typed condition.
 (require :asdf)
 (asdf:initialize-source-registry
  (list :source-registry (list :tree (truename "../../"))
@@ -11,78 +12,146 @@
 
 (defparameter *peer* "3C:64:CF:2D:55:A3")   ; hci1, the peripheral
 (defparameter *dev* 2)                      ; hci2, this side
-(defparameter +handle-a+ #x0010)
-(defparameter +handle-b+ #x0020)
-(defparameter +pairs+ 10)
 
 (ble:install-adapter-teardown)
 
-(let ((chan nil) (fails 0))
-  (flet ((check (ok label)
-           (format t "~&  [~A] ~A~%" (if ok " ok " "FAIL") label)
-           (unless ok (incf fails))
-           (force-output)))
-    (unwind-protect
-         (progn
-           (setf chan (ble:hci-user-att-connect
-                       (ble:parse-mac *peer*)
-                       :addr-type :public :dev *dev* :init-phys #x01
-                       :timeout 25 :retries 3))
-           (format t "~&[central] connected to ~A on hci~D~%" *peer* *dev*)
-           (force-output)
+(let ((fails 0) (checks 0))
+  (labels ((check (ok label)
+             (incf checks)
+             (format t "~&  [~A] ~A~%" (if ok " ok " "FAIL") label)
+             (unless ok (incf fails))
+             (force-output))
+           (u (n) (ble:uuid16 n)))
+    ;; with-att-channel: the adapter goes back however this ends, including
+    ;; on an error escaping the middle of the checks.
+    (ble:with-att-channel
+        (chan (ble:hci-user-att-connect (ble:parse-mac *peer*)
+                                        :addr-type :public :dev *dev*
+                                        :init-phys #x01 :timeout 25 :retries 3))
+      (format t "~&[central] connected to ~A on hci~D~%" *peer* *dev*)
+      (force-output)
 
-           ;; 1. Ask only for handle A. Every B that arrives meanwhile must be
-           ;;    kept, which is the entire point of the change.
-           (let ((got-a 0))
-             (dotimes (i +pairs+)
-               (when (ble:att-next-notification chan +handle-a+ 4000)
-                 (incf got-a)))
-             (format t "~&[central] handle A received: ~D/~D~%" got-a +pairs+)
-             (check (>= got-a (1- +pairs+)) "handle A notifications arrive"))
+      ;; --- MTU -----------------------------------------------------------
+      (let ((mtu (ble:att-exchange-mtu chan 247)))
+        (format t "~&[central] MTU -> ~A~%" mtu)
+        (check (and (integerp mtu) (>= mtu 23)) "MTU exchange completes"))
 
-           (let ((queued (ble:att-pending-notifications chan +handle-b+)))
-             (format t "~&[central] handle B queued while we asked for A: ~D~%" queued)
-             (check (plusp queued)
-                    "handle B was KEPT, not dropped (this is the bug)"))
+      ;; --- service discovery ---------------------------------------------
+      (let ((services (ble:att-discover-services chan)))
+        (format t "~&[central] services: ~{~A ~}~%"
+                (mapcar #'ble:gatt-service-uuid-string services))
+        (check (= 2 (length services)) "both services discovered")
+        (check (equal '("180A" "FFE0")
+                      (mapcar #'ble:gatt-service-uuid-string services))
+               "with the UUIDs the server declared, in handle order"))
 
-           ;; 2. The any-handle API, while the queue still holds the B's --
-           ;;    it must report WHICH characteristic spoke.
-           (multiple-value-bind (value handle) (ble:att-next-notification-any chan 4000)
-             (format t "~&[central] next-any: handle 0x~4,'0X value ~A~%"
-                     (or handle 0) value)
-             (check (and value (member handle (list +handle-a+ +handle-b+)))
-                    "att-next-notification-any names its handle"))
+      (let ((svc (ble:att-find-service chan (u #xFFE0))))
+        (check (and svc (string= "FFE0" (ble:gatt-service-uuid-string svc)))
+               "att-find-service resolves FFE0 in one round trip")
+        (check (null (ble:att-find-service chan (u #x1234)))
+               "and a UUID that is not there returns NIL"))
 
-           ;; 3. Drain the other handle. These are notifications the old code
-           ;;    had already thrown away by this point.
-           (let ((got-b 0))
-             (loop repeat (* 2 +pairs+)
-                   for v = (ble:att-next-notification chan +handle-b+ 1500)
-                   while v do (incf got-b))
-             (format t "~&[central] handle B received: ~D~%" got-b)
-             (check (>= got-b (- +pairs+ 2)) "handle B notifications are claimable"))
+      ;; --- characteristics ------------------------------------------------
+      (let* ((chars (ble:att-discover-characteristics chan))
+             (ffe1 (ble:find-char-by-uuid chars (u #xFFE1)))
+             (ffe2 (ble:find-char-by-uuid chars (u #xFFE2)))
+             (ffe3 (ble:find-char-by-uuid chars (u #xFFE3)))
+             (ffe4 (ble:find-char-by-uuid chars (u #xFFE4))))
+        (format t "~&[central] characteristics: ~{~A ~}~%"
+                (mapcar #'ble:gatt-char-uuid-string chars))
+        (check (= 6 (length chars)) "all six characteristics discovered")
+        (check (and ffe1 ffe2 ffe3 ffe4) "including every vendor one")
+        (let ((props (ble:gatt-char-property-names ffe1)))
+          (format t "~&[central] FFE1 properties: ~A~%" props)
+          (check (and (member :read props) (member :write props)
+                      (member :notify props))
+                 "FFE1 reports read + write + notify"))
 
-           ;; 4. Conditions, against a peer that really refuses the write.
-           (let ((r (ble:att-write-value chan #x00FF (vector 1))))
-             (format t "~&[central] default-style write returned: ~S~%" r)
-             (check (or (integerp r) (eq r :timeout))
-                    "default style returns a sentinel, never a condition"))
-           ;; Catch the whole hierarchy, then assert on which one arrived --
-           ;; that is the property the hierarchy exists for.
-           (handler-case
-               (ble:with-ble-conditions
-                 (ble:att-write-value chan #x00FF (vector 1))
-                 (check nil "with-ble-conditions should have signalled"))
-             (ble:ble-error (e)
-               (format t "~&[central] signalled: ~A (~A)~%" e (type-of e))
-               (check t "one handler for BLE-ERROR caught it")
-               (when (typep e 'ble:att-error)
-                 (check (= 1 (ble:att-error-code e)) "typed att-error, code 0x01")
-                 (check (= #x00FF (ble:att-error-handle e))
-                        "and it names the handle")))))
-      (when chan (ignore-errors (ble:att-channel-close chan)))
-      (format t "~&[central] adapter handed back~%")))
-  (format t "~&LIVE RESULT: ~:[~D CHECK(S) FAILED~;ALL CHECKS PASSED~]~%"
-          (zerop fails) fails)
-  (force-output))
-(sb-ext:exit)
+        ;; --- reads --------------------------------------------------------
+        (let ((maker (ble:find-char-by-uuid chars (u #x2A29))))
+          (check (equalp (map 'vector #'char-code "ACME")
+                         (ble:att-read-value chan (ble:gatt-char-handle maker)))
+                 "a static value reads back verbatim"))
+        (let* ((model (ble:find-char-by-uuid chars (u #x2A24)))
+               (h (ble:gatt-char-handle model))
+               (a (ble:att-read-value chan h))
+               (b (ble:att-read-value chan h)))
+          (format t "~&[central] computed value: ~A then ~A~%" a b)
+          (check (not (equalp a b))
+                 "an on-read characteristic is evaluated per read"))
+
+        ;; 300 octets over a 23-octet MTU and a 27-octet ACL: this only
+        ;; completes if Read Blob and L2CAP reassembly both work.
+        (let ((long (ble:att-read-long-value chan (ble:gatt-char-handle ffe4))))
+          (format t "~&[central] long read: ~D octets~%" (length long))
+          (check (= 300 (length long)) "a 300-octet value arrives whole")
+          (check (and (plusp (length long))
+                      (every (lambda (i) (= (aref long i) (mod i 251)))
+                             (loop for i below (length long) collect i)))
+                 "and every octet is the one the server put there"))
+
+        ;; --- writes -------------------------------------------------------
+        (check (eq t (ble:att-write-value chan (ble:gatt-char-handle ffe1) #(9 9)))
+               "a permitted write is acknowledged")
+        (check (equalp #(9 9) (ble:att-read-value chan (ble:gatt-char-handle ffe1)))
+               "and a later read returns what was written")
+        (check (= #x0D (ble:att-write-value chan (ble:gatt-char-handle ffe3)
+                                            #(1 2 3)))
+               "the server's on-write hook refuses with its own error code")
+        (check (eq t (ble:att-write-value chan (ble:gatt-char-handle ffe3) #(7)))
+               "and accepts the write it considers valid")
+
+        ;; --- two subscriptions at once -------------------------------------
+        (let ((cccd1 (ble:att-find-cccd chan (ble:gatt-char-handle ffe1)))
+              (cccd2 (ble:att-find-cccd chan (ble:gatt-char-handle ffe2))))
+          (format t "~&[central] CCCDs: 0x~4,'0X and 0x~4,'0X~%"
+                  (or cccd1 0) (or cccd2 0))
+          (check (and cccd1 cccd2) "descriptor discovery finds both CCCDs")
+          (ble:att-subscribe chan cccd1)
+          (ble:att-subscribe chan cccd2)
+          (check t "both subscriptions accepted")
+
+          (let ((from-a 0) (from-b 0)
+                (ha (ble:gatt-char-handle ffe1))
+                (hb (ble:gatt-char-handle ffe2)))
+            ;; Ask for ONE handle repeatedly. The other's traffic must be kept.
+            (dotimes (i 6)
+              (when (ble:att-next-notification chan ha 3000) (incf from-a)))
+            (let ((queued (ble:att-pending-notifications chan hb)))
+              (format t "~&[central] handle A: ~D received; handle B queued: ~D~%"
+                      from-a queued)
+              (check (plusp from-a) "notifications arrive on the handle asked for")
+              (check (plusp queued)
+                     "and the other characteristic's are KEPT, not dropped"))
+            ;; Now drain by whichever speaks, and confirm both are represented.
+            (dotimes (i 10)
+              (multiple-value-bind (v h) (ble:att-next-notification-any chan 2000)
+                (when v
+                  (cond ((eql h ha) (incf from-a))
+                        ((eql h hb) (incf from-b))))))
+            (format t "~&[central] totals: A=~D B=~D~%" from-a from-b)
+            (check (and (plusp from-a) (plusp from-b))
+                   "att-next-notification-any delivers from both handles")))
+
+        ;; --- conditions, against a live refusal ---------------------------
+        (let ((r (ble:att-write-value chan #x00FF #(1))))
+          (format t "~&[central] default-style write to a bad handle: ~S~%" r)
+          (check (or (integerp r) (eq r :timeout))
+                 "default style returns a sentinel, never a condition"))
+        (handler-case
+            (ble:with-ble-conditions
+              (ble:att-write-value chan #x00FF #(1))
+              (check nil "with-ble-conditions should have signalled"))
+          (ble:ble-error (e)
+            (format t "~&[central] signalled: ~A (~A)~%" e (type-of e))
+            (check t "a single BLE-ERROR handler catches it")
+            (when (typep e 'ble:att-error)
+              (check (= #x01 (ble:att-error-code e))
+                     "invalid handle, reported as a typed att-error")
+              (check (= #x00FF (ble:att-error-handle e))
+                     "naming the handle that was refused"))))))
+    (format t "~&[central] adapter handed back~%")
+    (format t "~&LIVE RESULT: ~D/~D checks passed~@[ -- ~D FAILED~]~%"
+            (- checks fails) checks (when (plusp fails) fails))
+    (force-output))
+  (sb-ext:exit :code (if (zerop fails) 0 1)))

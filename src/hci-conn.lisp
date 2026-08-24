@@ -101,7 +101,9 @@ HCI-SOCKET. Hand it back with CLOSE-HCI-USER-SOCKET."
             (check-syscall (%bind fd sa 6) "bind(HCI_CHANNEL_USER)"))
           (let ((sock (make-hci-socket :fd fd :dev dev)))
             ;; Returns (values SOCK LE-ACL-DATA-PACKET-LENGTH).
-            (values sock (hci-init-controller sock))))
+            (let ((acl-len (hci-init-controller sock)))
+              (setf (hci-socket-acl-len sock) acl-len)
+              (values sock acl-len))))
       (error (c)
         (%close fd)
         ;; HCIDEVDOWN already happened, so an error after it leaves the
