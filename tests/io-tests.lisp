@@ -1419,3 +1419,44 @@ shared secret that is neither correct nor stable."
       (is (equalp (ble:smp-dhkey a-priv b-x b-y)
                   (ble:smp-dhkey b-priv a-x a-y))
           "each side computes the same shared secret from the other's key"))))
+
+(test the-iocap-triple-is-reversed-from-the-wire-order
+  "A Pairing Request carries IO capability, OOB flag, AuthReq in that order;
+f6 takes the same three fields with AuthReq first and no opcode. Getting it
+wrong is invisible to a test where both ends share the mistake -- it took a
+phone to reject it."
+  (let ((pdu (hex->octets "01" "03" "00" "09" "10" "00" "00")))
+    ;; opcode 01, IOcap 03, OOB 00, AuthReq 09
+    (is (equalp #(#x09 #x00 #x03) (ble::%peer-iocap pdu))
+        "AuthReq, OOB, IO capability -- and three octets, not four")))
+
+(test a-protected-characteristic-demands-encryption-first
+  "Insufficient Authentication is what makes a central pair. On iOS it is the
+only lever a peripheral has: apps cannot ask to bond, so the phone starts
+pairing solely because a read came back with this."
+  (let ((server (ble:make-gatt-server :mtu 247)))
+    (ble:gatt-add-service server #xFFE0)
+    (let* ((h (ble:gatt-add-characteristic server :uuid #xFFE1
+                                                  :properties '(:read :write)
+                                                  :value #(1 2 3)
+                                                  :security :encrypted))
+           (lb (make-loopback server))
+           (chan (loopback-client lb)))
+      (multiple-value-bind (value err) (ble:att-read-value chan h)
+        (is (null value) "no value while the link is clear")
+        (is (= #x05 err) "insufficient authentication"))
+      (is (= #x05 (ble:att-write-value chan h #(9)))
+          "and writes are refused the same way")
+      ;; once the link is encrypted the same attribute is available
+      (setf (ble:gatt-server-encrypted server) t)
+      (is (equalp #(1 2 3) (ble:att-read-value chan h))
+          "and available once encrypted")
+      (is (eq t (ble:att-write-value chan h #(9)))))))
+
+(test an-unprotected-characteristic-is-unaffected
+  (multiple-value-bind (server value-handle) (demo-server)
+    (let* ((lb (make-loopback server))
+           (chan (loopback-client lb)))
+      (is (equalp #(1 2 3) (ble:att-read-value chan value-handle))
+          "a characteristic with no security requirement still reads on a
+clear link"))))

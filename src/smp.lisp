@@ -33,6 +33,7 @@
 (defconstant +smp-pairing-failed+      #x05)
 (defconstant +smp-pairing-public-key+  #x0C)
 (defconstant +smp-pairing-dhkey-check+ #x0D)
+(defconstant +smp-security-request+    #x0B)
 
 (defconstant +smp-io-no-input-no-output+ #x03)
 (defconstant +smp-auth-bonding+ #x01)
@@ -47,12 +48,32 @@
     (#x0B . "DHKey check failed")          (#x0C . "numeric comparison failed")))
 
 (define-condition smp-error (ble-error)
-  ((reason :initarg :reason :reader smp-error-reason))
+  ((reason :initarg :reason :reader smp-error-reason)
+   (source :initarg :source :initform :peer :reader smp-error-source))
   (:report (lambda (c s)
-             (format s "pairing failed: ~A"
+             (format s "pairing failed (~A): ~A"
+                     (ecase (smp-error-source c)
+                       (:peer "the peer rejected us")
+                       (:local "we rejected the peer"))
                      (or (cdr (assoc (smp-error-reason c) +smp-failure-reasons+))
                          (format nil "reason 0x~2,'0X" (smp-error-reason c))))))
-  (:documentation "The peer refused to pair, with an SMP reason code."))
+  (:documentation
+   "Pairing did not complete. SOURCE says which end refused, which is the
+first question worth answering: the same reason code means something quite
+different depending on who produced it."))
+
+(defvar *smp-trace* nil
+  "When true, print the pairing transcript's intermediate values.
+
+Pairing fails opaquely -- a reason code and nothing else -- and the values
+that went into a mismatched check value are exactly what is needed to tell a
+byte-order mistake from a wiring one.")
+
+(defun %trace-value (label octets)
+  (when *smp-trace*
+    (format *trace-output* "~&  smp ~12A ~{~2,'0X~}~%" label
+            (coerce octets 'list))
+    (force-output *trace-output*)))
 
 (defun smp-random (conn n)
   "N random octets from the controller's generator.
@@ -102,7 +123,8 @@ not stop the rest of the link."
           (setf (hci-conn-smp-pending conn)
                 (remove hit (hci-conn-smp-pending conn) :count 1))
           (when (= (aref hit 0) +smp-pairing-failed+)
-            (error 'smp-error :reason (if (>= (length hit) 2) (aref hit 1) #x08)))
+            (error 'smp-error :source :peer
+                              :reason (if (>= (length hit) 2) (aref hit 1) #x08)))
           (return hit)))
       (when (<= (- deadline (get-internal-real-time)) 0) (return nil))
       (when (eq :disconnected (%pump conn 200)) (return nil)))))
@@ -115,7 +137,7 @@ not stop the rest of the link."
 
 (defun smp-fail (conn reason)
   (ignore-errors (smp-send conn +smp-pairing-failed+ (vector reason)))
-  (error 'smp-error :reason reason))
+  (error 'smp-error :reason reason :source :local))
 
 ;;; --- pairing ------------------------------------------------------------
 
@@ -134,8 +156,28 @@ not implement."
                         #x00     ; initiator key distribution: none
                         #x00)))) ; responder key distribution: none
     (smp-send conn opcode p)
-    ;; f6 is fed the first three octets together with the opcode.
-    (cat (vector opcode) (%pairing-params io))))
+    ;; What f6 wants is NOT what went on the wire. The wire order of a
+    ;; Pairing Request is IO capability, OOB flag, AuthReq; f6 takes the same
+    ;; three fields in the opposite order, AuthReq first, and without the
+    ;; opcode. Feeding it the wire bytes produces a check value that is wrong
+    ;; in a way both ends of a self-test share -- so they agree with each
+    ;; other and fail against anything else. A phone rejected exactly this
+    ;; with "DHKey check failed".
+    (%iocap-triple (%pairing-params io))))
+
+(defun %iocap-triple (wire-params)
+  "The three octets f6 wants, from a Pairing Request/Response's three: the
+same fields, reversed."
+  (vector (aref wire-params 2)      ; AuthReq
+          (aref wire-params 1)      ; OOB data flag
+          (aref wire-params 0)))    ; IO capability
+
+(defun %peer-iocap (pdu)
+  "The peer's IOcap triple, from the Pairing Request or Response it sent.
+PDU includes the opcode, so the fields start at index 1."
+  (vector (aref pdu 3)              ; AuthReq
+          (aref pdu 2)              ; OOB data flag
+          (aref pdu 1)))            ; IO capability
 
 (defun smp-pair (conn &key (role :central) local-addr local-addr-type
                            peer-addr peer-addr-type (timeout-ms 20000))
@@ -160,7 +202,7 @@ devices."
           (let ((rsp (smp-next conn :expect +smp-pairing-response+
                                     :timeout-ms timeout-ms)))
             (unless rsp (smp-fail conn #x08))
-            (setf (smp-session-peer-io session) (subseq rsp 0 4))
+            (setf (smp-session-peer-io session) (%peer-iocap rsp))
             (unless (logtest +smp-auth-sc+ (aref rsp 3))
               ;; The peer wants legacy pairing. Refusing is the honest answer:
               ;; continuing would mean pretending to a security level we do
@@ -169,7 +211,7 @@ devices."
         (let ((req (smp-next conn :expect +smp-pairing-request+
                                   :timeout-ms timeout-ms)))
           (unless req (smp-fail conn #x08))
-          (setf (smp-session-peer-io session) (subseq req 0 4))
+          (setf (smp-session-peer-io session) (%peer-iocap req))
           (unless (logtest +smp-auth-sc+ (aref req 3)) (smp-fail conn #x03))
           (setf (smp-session-local-io session)
                 (%send-pairing conn +smp-pairing-response+ io))))
@@ -233,10 +275,19 @@ devices."
                    (smp-session-peer-addr session)))
            (a2 (if initiator (smp-session-peer-addr session)
                    (smp-session-local-addr session))))
+      (%trace-value "dhkey" dhkey)
+      (%trace-value "Na" (smp-session-na session))
+      (%trace-value "Nb" (smp-session-nb session))
+      (%trace-value "A (init)" a1)
+      (%trace-value "B (resp)" a2)
+      (%trace-value "IOcap loc" (smp-session-local-io session))
+      (%trace-value "IOcap peer" (smp-session-peer-io session))
       (multiple-value-bind (mackey ltk)
           (smp-f5 dhkey (smp-session-na session) (smp-session-nb session) a1 a2)
         (setf (smp-session-mackey session) mackey
               (smp-session-ltk session) ltk)
+        (%trace-value "mackey" mackey)
+        (%trace-value "ltk" ltk)
 
         ;; 5. check values, each computed over the other side's IO capability
         ;;    and address, so agreeing proves both derived the same key from
@@ -262,8 +313,11 @@ devices."
                 (let ((got (smp-next conn :expect +smp-pairing-dhkey-check+
                                           :timeout-ms timeout-ms)))
                   (unless got (smp-fail conn #x08))
+                  (%trace-value "Ea wanted" ea)
+                  (%trace-value "Ea got" (msb (subseq got 1 17)))
                   (unless (equalp ea (msb (subseq got 1 17)))
                     (smp-fail conn #x0B)))
+                (%trace-value "Eb sent" eb)
                 (smp-send conn +smp-pairing-dhkey-check+ (msb eb)))))))
     session))
 
@@ -319,3 +373,25 @@ out."
           ((< (length evt) 7) :timeout)
           ((/= (aref evt 3) 0) (aref evt 3))
           (t (= 1 (aref evt 6))))))
+
+(defun smp-request-security (conn &key (bonding t))
+  "Ask the central to start pairing. Peripheral only.
+
+A peripheral cannot initiate pairing -- only the central sends a Pairing
+Request -- so this is how one says it would like the link secured. It is what
+makes a phone offer to pair rather than sit connected and unbonded: without
+it, the central has no reason to think anything is wanted."
+  (smp-send conn +smp-security-request+
+            (vector (logior (if bonding +smp-auth-bonding+ 0) +smp-auth-sc+))))
+
+(defun smp-peer-addr-type (connection-complete-event)
+  "The peer's address type from an LE Connection Complete event.
+
+Worth reading rather than assuming: phones connect from a resolvable private
+address, so a peripheral that assumes :PUBLIC feeds the wrong type octet into
+f5 and derives a key the peer will not agree with -- and the failure surfaces
+as a check-value mismatch, which reads like a crypto bug rather than a
+one-octet mistake."
+  (if (and (>= (length connection-complete-event) 9)
+           (= 1 (aref connection-complete-event 8)))
+      :random :public))

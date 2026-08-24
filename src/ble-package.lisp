@@ -187,6 +187,8 @@
           gatt-attribute-uuid
           gatt-attribute-value
           gatt-attribute-permissions
+          gatt-attribute-security
+          gatt-server-encrypted
           gatt-attribute-read
           gatt-attribute-count
           gatt-find-attribute
@@ -255,6 +257,8 @@
           *coc-default-credits*
           ;; Security Manager (src/smp.lisp, src/smp-crypto.lisp)
           smp-pair
+          smp-request-security
+          smp-peer-addr-type
           smp-session
           smp-session-p
           smp-session-ltk
@@ -264,6 +268,8 @@
           smp-await-encryption
           smp-error
           smp-error-reason
+          smp-error-source
+          *smp-trace*
           smp-random
           smp-f4
           smp-f5

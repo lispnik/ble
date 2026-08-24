@@ -54,8 +54,14 @@ value or a reader that produces one.
 ON-READ lets a value be computed at the moment it is asked for, which is what
 a sensor characteristic wants -- a static octet vector would answer with
 whatever was true when the database was built. ON-WRITE returns NIL to accept
-a write, or an ATT error code to refuse it."
-  handle uuid (permissions '(:read)) (value (make-octets 0)) on-read on-write)
+a write, or an ATT error code to refuse it.
+
+SECURITY :ENCRYPTED refuses access until the link is encrypted. That is not
+only a protection: it is the *only* way a peripheral can get an iOS central to
+pair, because iOS gives apps no way to ask for bonding and starts it solely in
+response to Insufficient Authentication."
+  handle uuid (permissions '(:read)) (value (make-octets 0)) on-read on-write
+  (security nil))
 
 (defstruct (gatt-server (:constructor %make-gatt-server))
   "An attribute database and the MTU negotiated for the link it serves."
@@ -68,6 +74,10 @@ a write, or an ATT error code to refuse it."
   ;; more than the client agreed to accept.
   (rx-mtu 23)
   (mtu 23)
+  ;; Whether the link underneath is encrypted. The server cannot discover this
+  ;; for itself -- it arrives as an HCI event -- so whoever drives the
+  ;; connection sets it.
+  (encrypted nil)
   (cccd (make-hash-table :test #'eql))
   ;; Fragments from Prepare Write Requests, oldest first. Nothing here has
   ;; taken effect: that is the point of the queue, and why an Execute Write
@@ -123,7 +133,7 @@ Returns its start handle."
     handle))
 
 (defun gatt-add-characteristic (server &key uuid (properties '(:read)) value
-                                            on-read on-write)
+                                            on-read on-write security)
   "Add a characteristic to the service most recently begun. Lays down the
 declaration, the value attribute, and -- when PROPERTIES include :NOTIFY or
 :INDICATE -- a Client Characteristic Configuration descriptor.
@@ -148,7 +158,8 @@ characteristic does not notify."
                              :handle value-handle :uuid uuid
                              :permissions properties
                              :value (%as-value value)
-                             :on-read on-read :on-write on-write))
+                             :on-read on-read :on-write on-write
+                             :security security))
     (let ((cccd-handle
             (when (intersection properties '(:notify :indicate))
               (let ((h (%next-handle server)))
@@ -181,6 +192,7 @@ characteristic does not notify."
 (defconstant +att-err-write-not-permitted+  #x03)
 (defconstant +att-err-request-not-supported+ #x06)
 (defconstant +att-err-unsupported-group-type+ #x10)
+(defconstant +att-err-insufficient-authentication+ #x05)
 (defconstant +att-err-prepare-queue-full+   #x09)
 (defconstant +att-err-invalid-value-length+ #x0D)
 
@@ -206,6 +218,16 @@ server ran out of memory, and never execute them.")
                          (<= start (gatt-attribute-handle a) end))
                        (coerce (gatt-server-attributes server) 'list))
         #'< :key #'gatt-attribute-handle))
+
+(defun %security-shortfall (server attr)
+  "The ATT error for accessing ATTR at the link's current security, or NIL.
+
+Insufficient Authentication rather than a plain refusal: it tells the central
+what to *do* about it, and a central that wants the value will start pairing
+rather than give up."
+  (when (and (gatt-attribute-security attr)
+             (not (gatt-server-encrypted server)))
+    +att-err-insufficient-authentication+))
 
 (defun %readable-p (attr)
   (member :read (gatt-attribute-permissions attr)))
@@ -339,6 +361,8 @@ than answered emptily, or a client cannot tell 'none' from 'not that kind'."
       ((null attr) (%send-att-error chan opcode handle +att-err-invalid-handle+))
       ((not (%readable-p attr))
        (%send-att-error chan opcode handle +att-err-read-not-permitted+))
+      ((%security-shortfall server attr)
+       (%send-att-error chan opcode handle (%security-shortfall server attr)))
       (t (let ((value (gatt-attribute-read server attr)))
            (if (> offset (length value))
                (%send-att-error chan opcode handle +att-err-invalid-offset+)
@@ -389,6 +413,8 @@ cares should use a request."
       (unless (or (%writable-p attr)
                   (equalp (gatt-attribute-uuid attr) (uuid16 +gatt-cccd+)))
         (fail +att-err-write-not-permitted+))
+      (let ((short (%security-shortfall server attr)))
+        (when short (fail short)))
       ;; A CCCD write is the subscription itself: record it, because whether a
       ;; notification may be sent later is decided by this value.
       (when (equalp (gatt-attribute-uuid attr) (uuid16 +gatt-cccd+))
