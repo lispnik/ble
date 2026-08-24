@@ -328,6 +328,22 @@ Not implemented:
   protocol-correct way to not support it. Accepting one unverified would be
   worse than refusing.
 
+**One reader.** `hci-pump` is the only thing that reads from a connection's
+socket. It routes and never consumes: ATT PDUs are filed in the connection's
+pending queue, signalling frames answered, connection-oriented channels handed
+to theirs, and HCI events returned to the caller that asked. Everything that
+needs the transport — the ATT layer, an event wait, a CoC send waiting on
+credits, the Security Manager — goes through it.
+
+That is not an abstraction for its own sake. Five separate defects here were
+one shape: a helper that needed the transport took it over and discarded
+whatever it was not itself looking for. Reassembly kept one frame per read;
+notification dispatch dropped every handle but the awaited one; a blocking
+parameter request swallowed the peer's ATT requests; an event wait filed every
+ATT PDU as a notification and lost an in-flight response; the signalling
+server consumed a response another caller was blocked on. Each surfaced as an
+unrelated timeout elsewhere, and four of the five were invisible to the suite.
+
 **Two transports, one ATT layer.** `att-send` and `att-recv` dispatch on
 whether the channel is an integer fd (a kernel L2CAP socket) or an `hci-conn`,
 so every line of ATT protocol is shared:

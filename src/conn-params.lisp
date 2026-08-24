@@ -43,56 +43,36 @@
   (or handle (etypecase conn (hci-conn (hci-conn-handle conn)))))
 
 (defun %await-hci-event (conn &key event subevent (timeout-ms 5000))
-  "Wait for one HCI event, keeping any ACL data that arrives meanwhile.
+  "Wait for one HCI event, keeping everything else that arrives meanwhile.
 
-The reassembly is the point. A connection carrying notifications does not stop
-carrying them because the host asked the controller a question, and reading
-past those packets to find the event would drop them. They are fed through the
-same path an ordinary read uses, so a subscriber sees them afterwards."
-  (let ((sock (%conn-sock conn))
-        (deadline (+ (get-internal-real-time)
+Reads through HCI-PUMP, so ACL data is filed rather than read past: a
+connection carrying notifications does not stop carrying them because the host
+asked the controller a question. Notifications are then moved to the
+notification queue and anything else -- the response to a request already in
+flight, for instance -- is left in PENDING where the ATT layer will look for
+it. Taking the lot was a real bug: it presented as a long write timing out for
+no visible reason."
+  (let ((deadline (+ (get-internal-real-time)
                      (round (* timeout-ms internal-time-units-per-second) 1000))))
     (loop
       (let ((remaining (- deadline (get-internal-real-time))))
         (when (<= remaining 0) (return nil))
-        (let ((pkt (hci-poll-read sock (max 1 (round (* remaining 1000)
-                                                     internal-time-units-per-second)))))
+        (let ((r (hci-pump conn (max 1 (round (* remaining 1000)
+                                              internal-time-units-per-second)))))
           (cond
-            ((null pkt) nil)
-            ((and (= (aref pkt 0) #x02) (hci-conn-p conn))
-             ;; ACL data: reassemble and queue rather than discard.
-             (when (>= (length pkt) 5)
-               (let* ((flags (u16-le pkt 1))
-                      (pb (logand (ash flags -12) #x3))
-                      (acl-len (u16-le pkt 3))
-                      (data (subseq pkt 5 (min (length pkt) (+ 5 acl-len)))))
-                 (setf (hci-conn-rxbuf conn)
-                       (if (= pb #x01)
-                           (concatenate '(simple-array (unsigned-byte 8) (*))
-                                        (hci-conn-rxbuf conn) data)
-                           (coerce-octets data)))
-                 (%drain-l2cap-frames conn)
-                 (%maybe-serve-signalling conn)
-                 ;; Notifications go to the notification queue; anything else
-                 ;; stays where the ATT layer will look for it. Taking the lot
-                 ;; was wrong: a request can be in flight while the host waits
-                 ;; for an event, and its response was being dropped here --
-                 ;; which presented as a long write timing out for no visible
-                 ;; reason.
-                 (let ((keep '()))
-                   (loop for pdu = (pop (hci-conn-pending conn))
-                         while pdu
-                         do (unless (%att-note-server-pdu conn pdu)
-                              (push pdu keep)))
-                   (setf (hci-conn-pending conn)
-                         (nconc (nreverse keep) (hci-conn-pending conn)))))))
-            ((/= (aref pkt 0) #x04) nil)         ; not an event
-            ((and (>= (length pkt) 2) (= (aref pkt 1) +hci-disconn-complete-evt+))
-             (return :disconnected))
-            ((and event (>= (length pkt) 2) (= (aref pkt 1) event)
+            ((eq r :disconnected) (return :disconnected))
+            ((eq r :data)
+             (let ((keep '()))
+               (loop for pdu = (pop (hci-conn-pending conn))
+                     while pdu
+                     do (unless (%att-note-server-pdu conn pdu) (push pdu keep)))
+               (setf (hci-conn-pending conn)
+                     (nconc (nreverse keep) (hci-conn-pending conn)))))
+            ((and (vectorp r) event (>= (length r) 2) (= (aref r 1) event)
                   (or (null subevent)
-                      (and (>= (length pkt) 4) (= (aref pkt 3) subevent))))
-             (return pkt))))))))
+                      (and (>= (length r) 4) (= (aref r 3) subevent))))
+             (return r))))))))
+
 
 (defun hci-connection-update (conn &key (min-interval-ms 30) (max-interval-ms 50)
                                         (latency 0) (supervision-timeout-ms 4000)

@@ -62,35 +62,6 @@ partially received SDU between frames."
 
 ;;; --- pumping the transport ---------------------------------------------
 
-(defun %pump (conn timeout-ms)
-  "Read one packet and route it, without consuming anything a caller may be
-waiting for.
-
-The distinction that matters: ATT PDUs are left in PENDING for the ATT layer,
-not swallowed. Every bug this file's neighbours have had came from a helper
-that needed the transport, took it over, and discarded what it was not itself
-looking for."
-  (let ((pkt (hci-poll-read (hci-conn-sock conn) timeout-ms)))
-    (cond
-      ((null pkt) nil)
-      ((and (>= (length pkt) 2) (= (aref pkt 0) #x04)
-            (= (aref pkt 1) +hci-disconn-complete-evt+))
-       :disconnected)
-      ((and (= (aref pkt 0) #x02) (>= (length pkt) 5))
-       (let* ((flags (u16-le pkt 1))
-              (pb (logand (ash flags -12) #x3))
-              (acl-len (u16-le pkt 3))
-              (data (subseq pkt 5 (min (length pkt) (+ 5 acl-len)))))
-         (setf (hci-conn-rxbuf conn)
-               (if (= pb #x01)
-                   (concatenate '(simple-array (unsigned-byte 8) (*))
-                                (hci-conn-rxbuf conn) data)
-                   (coerce-octets data)))
-         (%drain-l2cap-frames conn)
-         (%maybe-serve-signalling conn)
-         t))
-      (t t))))
-
 ;;; --- data ---------------------------------------------------------------
 
 (defun %coc-note-frame (conn cid frame)
@@ -159,7 +130,7 @@ sleeping: the credits it is waiting for arrive on that transport."
           (loop while (<= (l2cap-coc-tx-credits coc) 0)
                 do (when (<= (- deadline (get-internal-real-time)) 0)
                      (return-from l2cap-coc-send :no-credits))
-                   (when (eq :disconnected (%pump conn 200))
+                   (when (eq :disconnected (hci-pump conn 200))
                      (return-from l2cap-coc-send :disconnected)))
           (hci-acl-send-l2cap conn (l2cap-coc-dcid coc) f)
           (decf (l2cap-coc-tx-credits coc)))))))
@@ -171,7 +142,7 @@ sleeping: the credits it is waiting for arrive on that transport."
     (loop
       (when (l2cap-coc-sdus coc) (return (pop (l2cap-coc-sdus coc))))
       (when (<= (- deadline (get-internal-real-time)) 0) (return nil))
-      (when (eq :disconnected (%pump (l2cap-coc-conn coc) 200))
+      (when (eq :disconnected (hci-pump (l2cap-coc-conn coc) 200))
         (return :disconnected)))))
 
 ;;; --- opening and closing ------------------------------------------------
@@ -219,7 +190,7 @@ for whatever two devices agree between themselves."
                       (push (cons scid coc) (hci-conn-coc-channels conn))
                       coc))))))
         (when (<= (- deadline (get-internal-real-time)) 0) (return :timeout))
-        (when (eq :disconnected (%pump conn 200)) (return :disconnected))))))
+        (when (eq :disconnected (hci-pump conn 200)) (return :disconnected))))))
 
 (defun l2cap-coc-listen (conn spsm &key (mtu *coc-default-mtu*)
                                         (mps *coc-default-mps*)
@@ -272,7 +243,7 @@ over the ones that have appeared."
       (when (hci-conn-coc-incoming conn)
         (return (pop (hci-conn-coc-incoming conn))))
       (when (<= (- deadline (get-internal-real-time)) 0) (return nil))
-      (when (eq :disconnected (%pump conn 200)) (return :disconnected)))))
+      (when (eq :disconnected (hci-pump conn 200)) (return :disconnected)))))
 
 (defun l2cap-coc-close (coc)
   "Close the channel. The peer is told, so it can free its own end."

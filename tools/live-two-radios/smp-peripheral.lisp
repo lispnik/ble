@@ -73,5 +73,5 @@
                   ;; actually leaves the controller. Tearing down immediately
                   ;; discards it, and the peer then reports a timeout instead
                   ;; of the reason we gave it.
-                  (dotimes (i 20) (ble::%pump conn 100))))))))))
+                  (dotimes (i 20) (ble:hci-pump conn 100))))))))))
 (sb-ext:exit)

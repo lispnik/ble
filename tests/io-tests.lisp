@@ -1539,3 +1539,29 @@ who, wrong about why, and it spent the whole timeout getting there."
         "carrying the peer's own reason")
     (is (search "we rejected the peer" (princ-to-string ours)))
     (is (search "DHKey check failed" (princ-to-string ours)))))
+
+(test the-pump-files-att-data-rather-than-returning-it
+  "HCI-PUMP's invariant, and the reason it exists: it routes, it does not
+consume. Everything that needs the transport goes through it, so no caller can
+read past what another is waiting for -- the shape of five separate bugs in
+this library's history."
+  (let ((conn (ble::make-hci-conn :handle 1 :acl-len 27)))
+    ;; feed it as though an ACL packet had been reassembled
+    (setf (ble::hci-conn-rxbuf conn)
+          (l2cap-frame 4 "1B0C00AA"))
+    (ble::%drain-l2cap-frames conn)
+    (is (= 1 (length (ble::hci-conn-pending conn)))
+        "an ATT PDU is filed in PENDING, not handed to whoever read the socket")
+    (is (equalp (hex->octets "1B0C00AA") (first (ble::hci-conn-pending conn))))))
+
+(test the-pump-keeps-signalling-and-att-apart
+  "Two owners, two queues. Before, everything that was not ATT was discarded."
+  (let ((conn (ble::make-hci-conn :handle 1 :acl-len 27)))
+    (setf (ble::hci-conn-rxbuf conn)
+          (concatenate '(simple-array (unsigned-byte 8) (*))
+                       (l2cap-frame 5 "12010800")      ; signalling
+                       (l2cap-frame 4 "1B0C00BB")))    ; ATT
+    (ble::%drain-l2cap-frames conn)
+    (is (= 1 (length (ble::hci-conn-pending conn))) "the ATT frame is kept")
+    (is (= 1 (length (ble::hci-conn-sig-pending conn)))
+        "and so is the signalling frame, in its own queue")))

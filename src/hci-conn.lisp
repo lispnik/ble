@@ -404,39 +404,73 @@ when losing it costs the most."
             ((and *l2cap-coc-frame-handler* (>= cid #x0040))
              (funcall *l2cap-coc-frame-handler* conn cid frame))))))))
 
+(defun hci-pump (conn &optional (timeout-ms 200))
+  "Read at most one HCI packet and route it. THE ONLY PLACE THAT READS FROM
+THE SOCKET.
+
+Returns NIL if nothing arrived, :DISCONNECTED if the link dropped, :DATA if
+ACL data was filed, or the event packet itself for anything else -- events are
+not queued anywhere, so handing them back is the only way a caller can match
+one.
+
+It never returns ACL payload and it never discards any. Reassembled frames are
+filed where their owners will look: ATT PDUs into PENDING, signalling frames
+answered, connection-oriented channels handed to theirs.
+
+That invariant is the point of this function existing. Five separate defects
+in this library were one shape -- a helper that needed the transport took it
+over and threw away whatever it was not itself looking for. The L2CAP
+reassembly kept one frame per read and dropped the rest; notification dispatch
+dropped every handle but the one being waited on; a blocking parameter request
+swallowed the peer's ATT requests; an event wait filed every ATT PDU as a
+notification, losing the response to a request already in flight; and the
+signalling server consumed a response another caller was blocked on. Each
+surfaced as an unrelated timeout somewhere else, and four of the five were
+invisible to the test suite. Everything that needs the transport now goes
+through here, so a sixth is harder to write than to avoid."
+  (let ((pkt (hci-poll-read (hci-conn-sock conn) timeout-ms)))
+    (cond
+      ((null pkt) nil)
+      ((and (>= (length pkt) 2) (= (aref pkt 0) #x04))    ; HCI event
+       (if (= (aref pkt 1) +hci-disconn-complete-evt+)
+           :disconnected
+           pkt))
+      ((and (= (aref pkt 0) #x02) (>= (length pkt) 5))    ; ACL data
+       (let* ((flags (u16-le pkt 1))
+              (pb (logand (ash flags -12) #x3))
+              (acl-len (u16-le pkt 3))
+              (data (subseq pkt 5 (min (length pkt) (+ 5 acl-len)))))
+         ;; pb #x01 continues the frame in progress; anything else starts a
+         ;; new one, and whatever was buffered was a partial we will never be
+         ;; able to complete.
+         (setf (hci-conn-rxbuf conn)
+               (if (= pb #x01)
+                   (concatenate '(simple-array (unsigned-byte 8) (*))
+                                (hci-conn-rxbuf conn) data)
+                   (coerce-octets data)))
+         (%drain-l2cap-frames conn)
+         (%maybe-serve-signalling conn)
+         :data))
+      (t :data))))
+
 (defun hci-acl-recv-att (conn timeout-ms)
-  "Read until a complete ATT PDU arrives on the ATT CID; reassembles ACL
-fragments. Returns the ATT PDU octets, NIL on timeout, or :DISCONNECTED."
-  ;; Anything a previous call reassembled but did not hand back comes first,
-  ;; before going near the socket -- otherwise a queued PDU could sit behind a
-  ;; timeout that has nothing to do with it.
+  "The next ATT PDU: octets, NIL on timeout, or :DISCONNECTED.
+
+Only takes from the queue HCI-PUMP fills, so an ATT PDU cannot be lost to
+whatever else happened to arrive alongside it."
   (when (hci-conn-pending conn)
     (return-from hci-acl-recv-att (pop (hci-conn-pending conn))))
-  (loop
-    (let ((pkt (hci-poll-read (hci-conn-sock conn) timeout-ms)))
-      (unless pkt (return nil))
-      (case (aref pkt 0)
-        (#x04                            ; HCI event
-         (when (= (aref pkt 1) +hci-disconn-complete-evt+)
-           (return :disconnected)))      ; else ignore (e.g. num-completed)
-        (#x02                            ; ACL data
-         (when (>= (length pkt) 5)
-           (let* ((flags (u16-le pkt 1))
-                  (pb (logand (ash flags -12) #x3))
-                  (acl-len (u16-le pkt 3))
-                  (data (subseq pkt 5 (min (length pkt) (+ 5 acl-len)))))
-             ;; pb #x01 continues the frame in progress; anything else starts
-             ;; a new one, and whatever was buffered was a partial we will
-             ;; never be able to complete.
-             (setf (hci-conn-rxbuf conn)
-                   (if (= pb #x01)
-                       (concatenate '(simple-array (unsigned-byte 8) (*))
-                                    (hci-conn-rxbuf conn) data)
-                       (coerce-octets data)))
-             (%drain-l2cap-frames conn)
-             (%maybe-serve-signalling conn)
-             (when (hci-conn-pending conn)
-               (return (pop (hci-conn-pending conn)))))))))))
+  (let ((deadline (+ (get-internal-real-time)
+                     (round (* timeout-ms internal-time-units-per-second) 1000))))
+    (loop
+      (let ((remaining (- deadline (get-internal-real-time))))
+        (when (<= remaining 0) (return nil))
+        (let ((r (hci-pump conn (max 1 (round (* remaining 1000)
+                                              internal-time-units-per-second)))))
+          (when (eq r :disconnected) (return :disconnected))
+          (when (hci-conn-pending conn)
+            (return (pop (hci-conn-pending conn))))
+          (when (null r) (return nil)))))))
 
 ;;; --- top-level: NUS over the HCI_CHANNEL_USER transport ----------------
 

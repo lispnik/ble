@@ -208,7 +208,7 @@ not stop the rest of the link."
       (loop
         (let ((hit (claim))) (when hit (return hit)))
         (when (<= (- deadline (get-internal-real-time)) 0) (return nil))
-        (when (eq :disconnected (%pump conn 200))
+        (when (eq :disconnected (hci-pump conn 200))
           ;; A peer that refuses usually sends Pairing Failed and drops
           ;; immediately after, so the frame and the disconnect can surface
           ;; from the same read. Look once more before blaming the link: the
