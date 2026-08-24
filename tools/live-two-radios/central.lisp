@@ -237,6 +237,39 @@
         (check (equalp #(9 9) (ble:att-read-value chan (ble:gatt-char-handle ffe1)))
                "and the link still serves reads after the renegotiation")
 
+        ;; --- a connection-oriented channel ---------------------------------
+        ;; Not GATT: a stream, with credit-based flow control. The SDU is
+        ;; larger than the MPS, so it is sent as several frames and has to be
+        ;; reassembled at the far end, and larger than the credits initially
+        ;; granted, so the sender must wait to be topped up partway through.
+        (let ((coc (ble:l2cap-coc-connect chan #x0080 :timeout-ms 10000)))
+          (format t "~&[central] CoC connect -> ~A~%"
+                  (if (ble:l2cap-coc-p coc) :opened coc))
+          (check (ble:l2cap-coc-p coc) "the channel opens")
+          (when (ble:l2cap-coc-p coc)
+            (format t "~&[central] CoC: peer MTU ~D, MPS ~D, credits ~D~%"
+                    (ble:l2cap-coc-peer-mtu coc) (ble:l2cap-coc-peer-mps coc)
+                    (ble:l2cap-coc-tx-credits coc))
+            (check (plusp (ble:l2cap-coc-peer-mtu coc))
+                   "and the peer states an MTU")
+            (check (< (ble:l2cap-coc-tx-credits coc) 5)
+                   "the peer grants fewer credits than the SDU needs frames,
+so the send below has to wait to be topped up")
+            (let ((payload (ble:make-octets 400)))
+              (dotimes (i 400) (setf (aref payload i) (mod (* i 3) 251)))
+              (let ((r (ble:l2cap-coc-send coc payload :timeout-ms 8000)))
+                (format t "~&[central] CoC send of 400 octets -> ~A~%" r)
+                (check (eq t r) "a 400-octet SDU is sent"))
+              (let ((back (ble:l2cap-coc-recv coc :timeout-ms 8000)))
+                (format t "~&[central] CoC echo: ~A octets~%"
+                        (if (vectorp back) (length back) back))
+                (check (and (vectorp back) (= 400 (length back)))
+                       "and comes back the same length")
+                (check (equalp payload back)
+                       "with every octet intact across the fragmentation")))
+            (ble:l2cap-coc-close coc)
+            (check (ble:l2cap-coc-closed coc) "and the channel closes")))
+
         ;; --- conditions, against a live refusal ---------------------------
         (let ((r (ble:att-write-value chan #x00FF #(1))))
           (format t "~&[central] default-style write to a bad handle: ~S~%" r)

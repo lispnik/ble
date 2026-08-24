@@ -1248,3 +1248,81 @@ ones, which is the same trap as everywhere else on this boundary."
     (setf (aref truncated 0) #x12)
     (is (null (ble:parse-conn-param-request truncated))
         "and a frame too short to hold four parameters is refused")))
+
+;;; --- connection-oriented channels: SDU reassembly -----------------------
+;;;
+;;; The framing, without a radio. Credits start high here so the automatic
+;;; replenish (which would try to transmit) stays out of the way; the exchange
+;;; itself is verified over two radios.
+
+(defun coc-fixture (&key (credits 100))
+  "A connection with one channel on it, and no socket."
+  (let* ((conn (ble::make-hci-conn :handle 1 :acl-len 27))
+         (coc (ble::%make-l2cap-coc :conn conn :scid #x0040 :dcid #x0041
+                                    :peer-mtu 512 :peer-mps 96
+                                    :tx-credits 10 :rx-credits credits)))
+    (push (cons #x0040 coc) (ble::hci-conn-coc-channels conn))
+    (values conn coc)))
+
+(defun k-frame (payload &key sdu-length)
+  "A K-frame: the first of an SDU carries its total length, the rest do not."
+  (let ((payload (ble:coerce-octets payload)))
+    (if sdu-length
+        (let ((f (ble:make-octets (+ 2 (length payload)))))
+          (ble:u16le-put f 0 sdu-length)
+          (replace f payload :start1 2)
+          f)
+        payload)))
+
+(test a-single-frame-sdu-is-delivered-whole
+  (multiple-value-bind (conn coc) (coc-fixture)
+    (ble::%coc-note-frame conn #x0040 (k-frame #(1 2 3) :sdu-length 3))
+    (is (equalp #(1 2 3) (ble:l2cap-coc-recv coc :timeout-ms 0))
+        "the payload, without its length prefix")))
+
+(test an-sdu-split-across-frames-is-reassembled
+  "Only the first frame carries the length; the rest are payload, and the
+receiver knows it is done by counting rather than by any end marker."
+  (multiple-value-bind (conn coc) (coc-fixture)
+    (ble::%coc-note-frame conn #x0040 (k-frame #(1 2 3 4) :sdu-length 10))
+    (is (null (ble:l2cap-coc-recv coc :timeout-ms 0))
+        "an incomplete SDU must not be delivered")
+    (ble::%coc-note-frame conn #x0040 (k-frame #(5 6 7 8)))
+    (is (null (ble:l2cap-coc-recv coc :timeout-ms 0)))
+    (ble::%coc-note-frame conn #x0040 (k-frame #(9 10)))
+    (is (equalp #(1 2 3 4 5 6 7 8 9 10) (ble:l2cap-coc-recv coc :timeout-ms 0))
+        "and all ten octets arrive in order once the last frame lands")))
+
+(test two-sdus-back-to-back-do-not-run-together
+  (multiple-value-bind (conn coc) (coc-fixture)
+    (ble::%coc-note-frame conn #x0040 (k-frame #(1 1) :sdu-length 2))
+    (ble::%coc-note-frame conn #x0040 (k-frame #(2 2 2) :sdu-length 3))
+    (is (equalp #(1 1) (ble:l2cap-coc-recv coc :timeout-ms 0)))
+    (is (equalp #(2 2 2) (ble:l2cap-coc-recv coc :timeout-ms 0))
+        "the second SDU starts a fresh length, not a continuation")))
+
+(test every-received-frame-costs-a-credit
+  "Credits are the whole flow-control mechanism: one frame, one credit."
+  (multiple-value-bind (conn coc) (coc-fixture :credits 100)
+    (ble::%coc-note-frame conn #x0040 (k-frame #(1 2 3) :sdu-length 3))
+    (is (= 99 (ble:l2cap-coc-rx-credits coc)))
+    (ble::%coc-note-frame conn #x0040 (k-frame #(4) :sdu-length 1))
+    (is (= 98 (ble:l2cap-coc-rx-credits coc))
+        "each frame, not each SDU")))
+
+(test a-frame-for-an-unknown-channel-is-ignored
+  "A CID we never allocated is not ours; treating it as a channel would put
+somebody else's octets into our stream."
+  (multiple-value-bind (conn coc) (coc-fixture)
+    (ble::%coc-note-frame conn #x007E (k-frame #(9 9) :sdu-length 2))
+    (is (null (ble:l2cap-coc-recv coc :timeout-ms 0)))
+    (is (= 100 (ble:l2cap-coc-rx-credits coc))
+        "and costs no credit on a channel it does not belong to")))
+
+(test an-sdu-larger-than-the-peer-said-it-would-take-is-refused
+  (multiple-value-bind (conn coc) (coc-fixture)
+    (declare (ignore conn))
+    (is (eq :too-large
+            (ble:l2cap-coc-send coc (ble:make-octets 513) :timeout-ms 0))
+        "the peer advertised an MTU of 512; sending more is a protocol error,
+not something to discover from the far end going quiet")))

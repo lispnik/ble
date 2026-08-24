@@ -171,7 +171,10 @@ one, and the surplus has to survive until the next call. SIG-PENDING is the
 same for the L2CAP signalling channel, whose frames used to be dropped on the
 floor along with every other non-ATT CID."
   sock handle acl-len (rxbuf (make-octets 0)) (pending '()) (sig-pending '())
-  (sig-results '()))
+  (sig-results '())
+  ;; Connection-oriented channels, keyed by the CID we allocated for each,
+  ;; plus the SPSMs we accept and the channels a peer has opened to them.
+  (coc-channels '()) (coc-listeners '()) (coc-incoming '()) (coc-next-cid #x0040))
 
 (defun %await-le-connection (sock opcode timeout-ms)
   "Wait up to TIMEOUT-MS (a wall-clock deadline) for the (Enhanced)
@@ -337,6 +340,10 @@ connection parameter requests on CID 0x0005 -- so the framing is shared."
   "Send an ATT PDU on the ATT CID."
   (hci-acl-send-l2cap conn +att-cid+ pdu))
 
+(defvar *l2cap-coc-frame-handler* nil
+  "Called with (CONN CID FRAME) for data on a dynamic CID. Set by
+src/l2cap-coc.lisp; a hook for the same reason the signalling one is.")
+
 (defvar *l2cap-signalling-handler* nil
   "Called with the connection after frames are reassembled, to answer anything
 that arrived on the signalling channel. Set by src/l2cap-signalling.lisp.
@@ -384,7 +391,11 @@ when losing it costs the most."
             ;; waiting for an answer that will never come.
             ((= cid +l2cap-sig-cid+)
              (setf (hci-conn-sig-pending conn)
-                   (nconc (hci-conn-sig-pending conn) (list frame))))))))))
+                   (nconc (hci-conn-sig-pending conn) (list frame))))
+            ;; A dynamic CID belongs to a connection-oriented channel. The
+            ;; hook keeps this file from having to know how one works.
+            ((and *l2cap-coc-frame-handler* (>= cid #x0040))
+             (funcall *l2cap-coc-frame-handler* conn cid frame))))))))
 
 (defun hci-acl-recv-att (conn timeout-ms)
   "Read until a complete ATT PDU arrives on the ATT CID; reassembles ACL

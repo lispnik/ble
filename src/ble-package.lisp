@@ -231,6 +231,28 @@
           hci-conn-sig-results
           l2cap-conn-param-result
           *l2cap-signalling-handler*
+          ;; Connection-oriented channels (src/l2cap-coc.lisp)
+          l2cap-coc
+          l2cap-coc-p
+          l2cap-coc-connect
+          l2cap-coc-listen
+          l2cap-coc-accept
+          l2cap-coc-send
+          l2cap-coc-recv
+          l2cap-coc-close
+          l2cap-coc-give-credits
+          l2cap-coc-scid
+          l2cap-coc-dcid
+          l2cap-coc-mtu
+          l2cap-coc-mps
+          l2cap-coc-peer-mtu
+          l2cap-coc-peer-mps
+          l2cap-coc-tx-credits
+          l2cap-coc-rx-credits
+          l2cap-coc-closed
+          *coc-default-mtu*
+          *coc-default-mps*
+          *coc-default-credits*
           ;; Giving the adapter back (src/teardown.lisp)
           *open-att-channels*
           register-att-channel

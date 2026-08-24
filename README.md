@@ -147,6 +147,35 @@ the ones asked for — the peer may answer anywhere inside the range. Using the
 requested numbers afterwards is how a link ends up being driven at an interval
 it is not running at.
 
+## Streams: connection-oriented channels
+
+`l2cap-coc-connect`, `l2cap-coc-listen` / `l2cap-coc-accept`,
+`l2cap-coc-send`, `l2cap-coc-recv`, `l2cap-coc-close`. A stream between two
+devices that is not GATT: ATT moves one value at a time and pays a round trip
+for each, while a CoC carries an SDU of up to 64 KiB — the right shape for a
+firmware image or a log download.
+
+The flow control is the substance, and it runs opposite to most protocols: a
+sender may transmit exactly as many frames as the receiver has granted credits
+for, and not one more. Overrun is structurally impossible rather than merely
+unlikely — no window to misjudge, no rate to tune. The cost is that a sender
+with no credits must stop, and a receiver that forgets to replenish silently
+wedges the channel, which looks exactly like a peer with nothing to say. So
+replenishing happens here, on receipt, rather than being left to the caller.
+
+Two sizes, easily confused: **MTU** is the largest SDU the peer will accept,
+**MPS** the largest single frame. One SDU is split across as many frames as
+MPS requires, and only the first carries a 2-octet length, so the receiver
+knows it is done by counting rather than by any end marker.
+
+`SPSM` is the LE equivalent of a port number. Below 0x0080 the SIG assigns
+them; 0x0080 and up are free for two devices to agree between themselves.
+
+The live harness runs 400 octets at MPS 96 against a listener granting **two**
+credits, so the sender runs dry after two frames and has to wait to be topped
+up mid-SDU. Granting enough up front would leave the flow control — the entire
+point of the channel type — never actually exercised.
+
 ## When the peripheral wants different parameters
 
 Only the central issues LE Connection Update, so a peripheral that wants a
@@ -219,6 +248,12 @@ and the long *write* by the same harness, whose server now offers a writable
 300-octet characteristic — at MTU 23 a Write Request carries 20 octets, so it
 completes only if Prepare and Execute work on both sides.
 
+This library is Linux and raw HCI, deliberately — not a BlueZ D-Bus client and
+not portable to CoreBluetooth. Owning the controller is what makes the
+initiating PHY selectable and `HCI_CHANNEL_USER` possible, and those are the
+capabilities its consumers exist for. The cost is `CAP_NET_ADMIN` and a Linux
+box to run on, which is the trade being made rather than a gap to close.
+
 Not implemented:
 
 - **SMP** — no pairing, bonding or encryption, so this cannot talk to a peer
@@ -229,7 +264,7 @@ Not implemented:
   client cannot split them without already knowing each length; 0x20 prefixes
   each with its length and fixes that. Low priority: anything it does can be
   done with separate reads, and **it cannot be tested here** — see below.
-- **L2CAP connection-oriented channels**, so no high-throughput transfers.
+
 - **Signed Writes.** Verifying one needs a CSRK, which is distributed by
   bonding, which needs SMP. Until that exists the only honest thing to do with
   a signed write is ignore it — and since it is a command, silence is also the

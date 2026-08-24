@@ -43,6 +43,7 @@
                              (:file "hci-conn"   :depends-on ("nus"))
                              (:file "conn-params" :depends-on ("hci-conn"))
                              (:file "l2cap-signalling" :depends-on ("conn-params"))
+                             (:file "l2cap-coc" :depends-on ("l2cap-signalling"))
                              (:file "teardown"   :depends-on ("hci-conn"))
                              ;; last: wraps acquire/release pairs from all of
                              ;; the above

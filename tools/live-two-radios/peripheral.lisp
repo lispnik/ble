@@ -95,9 +95,19 @@
             (format t "~&[peripheral] no central attached~%")
             (let ((conn (make-hci-conn :sock sock :handle handle
                                        :acl-len (hci-socket-acl-len sock)))
-                  (served 0) (sent 0) (param-ident nil) (param-result nil))
+                  (served 0) (sent 0) (param-ident nil) (param-result nil)
+                  (coc nil) (echoed 0))
               (format t "~&[peripheral] connected, handle 0x~4,'0X~%" handle)
               (force-output)
+              ;; Listen for a connection-oriented channel on a free SPSM.
+              ;; 0x0080 and up are unassigned, for two devices to agree
+              ;; between themselves.
+              ;; Two credits, deliberately: a 400-octet SDU at MPS 96 needs
+              ;; five frames, so the sender runs out partway through and must
+              ;; wait to be topped up. Granting enough up front would leave
+              ;; the flow control -- the whole point of this channel type --
+              ;; never actually exercised.
+              (l2cap-coc-listen conn #x0080 :credits 2)
               ;; Serve until the client leaves or the deadline passes, and
               ;; notify both characteristics once it subscribes -- two
               ;; notifying characteristics on one link is what the client's
@@ -141,6 +151,20 @@
                         (setf param-result r)
                         (format t "~&[peripheral] parameter update -> ~A~%" r)
                         (force-output))))
+                  ;; Echo anything that arrives on a CoC. The channel is
+                  ;; created from the receive path when the peer opens it, so
+                  ;; this only has to notice it appearing.
+                  (unless coc
+                    (setf coc (l2cap-coc-accept conn :timeout-ms 0))
+                    (when (l2cap-coc-p coc)
+                      (format t "~&[peripheral] CoC opened: peer MTU ~D, MPS ~D~%"
+                              (l2cap-coc-peer-mtu coc) (l2cap-coc-peer-mps coc))
+                      (force-output)))
+                  (when (l2cap-coc-p coc)
+                    (let ((sdu (l2cap-coc-recv coc :timeout-ms 0)))
+                      (when (vectorp sdu)
+                        (incf echoed)
+                        (l2cap-coc-send coc sdu :timeout-ms 3000))))
                   (when (zerop (mod (incf i) 4))
                     (when (gatt-notify server conn ffe1
                                        (vector #xA0 (mod i 256)) :cccd-handle cccd1)
@@ -149,8 +173,8 @@
                                        (vector #xB0 (mod i 256)) :cccd-handle cccd2)
                       (incf sent)))))
               (format t "~&[peripheral] answered ~D requests, sent ~D notifications, ~
-                         parameter update ~A~%"
-                      served sent (or param-result :none))
+                         parameter update ~A, CoC echoed ~D~%"
+                      served sent (or param-result :none) echoed)
               (force-output)))))))
 (format t "~&[peripheral] adapter handed back~%")
 (sb-ext:exit)

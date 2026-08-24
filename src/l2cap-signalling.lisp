@@ -22,6 +22,10 @@
 (defconstant +l2cap-param-accepted+ #x0000)
 (defconstant +l2cap-param-rejected+ #x0001)
 
+(defvar *l2cap-coc-signalling-handler* nil
+  "Called with (CONN FRAME) before the parameter-update handling, returning T
+if it claimed the frame. Set by src/l2cap-coc.lisp.")
+
 (defvar *l2cap-sig-ident* 0
   "Rolling identifier for outgoing signalling commands. A response carries the
 identifier of the request it answers, which is how the two are paired.")
@@ -102,12 +106,22 @@ then did not update would be lying to the peer in a way it cannot detect."
 
 Unknown commands get a Command Reject rather than silence: the peer is waiting
 for something, and 'not understood' is an answer it can act on."
-  (let ((handled 0))
+  (let ((handled 0) (leave '()))
     (loop for frame = (pop (hci-conn-sig-pending conn))
           while frame
           do (incf handled)
-             (let ((code (aref frame 0)))
+             (let* ((code (aref frame 0))
+                    (claim (and *l2cap-coc-signalling-handler*
+                                (funcall *l2cap-coc-signalling-handler*
+                                         conn frame))))
                (cond
+                 ;; A response somebody else is blocked on. Draining it here
+                 ;; would leave them waiting out a timeout for a frame that
+                 ;; had already arrived -- so put it back.
+                 ((eq claim :leave) (push frame leave) (decf handled))
+                 ;; Connection-oriented channels take their own commands
+                 ;; first; the hook keeps this file independent of that one.
+                 (claim nil)
                  ((= code +l2cap-conn-param-update-req+)
                   (l2cap-answer-conn-param-request conn frame :accept accept))
                  ((= code +l2cap-conn-param-update-rsp+)
@@ -124,6 +138,8 @@ for something, and 'not understood' is an answer it can act on."
                                      (let ((d (make-octets 2)))
                                        (u16le-put d 0 0) ; command not understood
                                        d))))))
+    (setf (hci-conn-sig-pending conn)
+          (nconc (nreverse leave) (hci-conn-sig-pending conn)))
     handled))
 
 (defun l2cap-request-conn-params (conn &key (min-interval-ms 30) (max-interval-ms 50)
