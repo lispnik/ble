@@ -81,6 +81,47 @@ every one of those paths used to discard them. A subscriber could lose an
 arbitrary number of readings to an unrelated request running concurrently, and
 nothing reported it.
 
+## Writing a peripheral
+
+`examples/heart-rate/` is a complete one: a Bluetooth heart rate sensor in
+about 150 lines, in its own package using only exported symbols. That last part
+is the test — if an example needs anything from inside `#:ble`, the library has
+not finished the job.
+
+```lisp
+(ble:with-hci-user-socket (sock (ble:default-hci-dev))
+  (ble:set-adv-data sock (ble:adv-data :flags '(:general-discoverable :no-bredr)
+                                       :name "Lisp HRM"
+                                       :services-16 '(#x180D)))
+  (ble:serve-peripheral server sock
+                        :on-connect (lambda (conn peer type) ...)
+                        :on-tick    (lambda (conn)
+                                      (ble:gatt-notify server conn handle value))))
+```
+
+`serve-peripheral` is the loop every peripheral needs, and it exists because
+two things about it are less obvious than they look:
+
+- **Advertising stops the moment a central connects.** That is the
+  specification, not a fault. A peripheral that does not re-enable it after a
+  disconnect silently vanishes: the process looks healthy, the adapter is up,
+  and the device is simply not there. This cost two debugging sessions before
+  it was understood.
+- **A disconnect is not a queued event.** `hci-pump` reports it as
+  `:DISCONNECTED` and files nothing, so a loop that ignores the return value
+  waits forever for a client that left.
+
+`peripheral-accept` handles the other trap: the connection arrives as either
+the plain or the Enhanced Connection Complete subevent depending on the
+controller's event mask, and handling only the first presents as a peripheral
+nobody can connect to.
+
+`adv-data` builds the payload. It signals rather than truncating when the
+result will not fit in 31 octets, because the overrun is silent on the wire and
+looks like a device nobody can see. Advertising the service UUID matters more
+than it appears: a heart rate sensor that omits `0x180D` is invisible to every
+heart rate app, however correct the database behind it.
+
 ## Being the peripheral: the GATT server
 
 `src/gatt-server.lisp` is the other direction — an attribute database, and the

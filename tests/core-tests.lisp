@@ -129,3 +129,57 @@ this wrong."
   (is-false (ble:static-random-address-p (ble:static-random-address
                                           (ble:make-octets 6)))
             "all-zero is reserved, even with the bits set"))
+
+;;; --- building advertising payloads --------------------------------------
+;;;
+;;; Round-tripped through the parsers in the same file. That symmetry is the
+;;; reason the builder lives here: if the two disagree, one of them is wrong,
+;;; and a payload that parses back to what went in is the strongest statement
+;;; either can make without a radio.
+
+(test an-advertising-payload-parses-back-to-what-went-in
+  (let ((data (ble:adv-data :flags '(:general-discoverable :no-bredr)
+                            :name "HR Sensor"
+                            :services-16 '(#x180D))))
+    (is (string= "HR Sensor" (ble:adv-local-name data))
+        "the name survives the round trip")
+    (is (equal '(#x180D) (ble:adv-service-uuids-16 data))
+        "and so does the service UUID, which is what makes it findable")))
+
+(test several-service-uuids-go-in-one-record
+  (let ((data (ble:adv-data :services-16 '(#x180D #x180A #x1801))))
+    (is (equal '(#x180D #x180A #x1801) (ble:adv-service-uuids-16 data)))
+    (is (= 8 (length data)) "one record: length, type, and three UUIDs")))
+
+(test each-record-is-length-prefixed-and-counts-its-own-type
+  "The length octet covers the type as well as the value -- off by one here
+produces a payload that parses as garbage from the second record onward."
+  (let ((data (ble:adv-data :flags :general-discoverable)))
+    (is (= 3 (length data)))
+    (is (= 2 (aref data 0)) "length is 2: the type octet plus one flag octet")
+    (is (= #x01 (aref data 1)) "AD type Flags")
+    (is (= #x02 (aref data 2)) "general discoverable")))
+
+(test a-payload-that-will-not-fit-is-refused
+  "31 octets is not much, and an overrun is silent on the wire: the device
+simply becomes one nobody can see."
+  (signals error (ble:adv-data :name "a name far too long to fit in a legal
+                                      advertising payload alongside anything"))
+  ;; the same content fits when the caller knows it is going in a scan response
+  (is-true (ble:adv-data :name "0123456789012345678901234567890123456789"
+                         :max-length 62)))
+
+(test manufacturer-data-needs-a-company-id
+  (signals error (ble:adv-data :manufacturer #(1 2 3)))
+  (let ((data (ble:adv-data :manufacturer #(#xDE #xAD) :company-id #x004C)))
+    (is (equalp #(#xDE #xAD) (ble:extract-manufacturer-data data))
+        "and parses back through the manufacturer-data reader")))
+
+(test appearance-is-little-endian-like-everything-else
+  (let ((data (ble:adv-data :appearance #x0341)))
+    (is (= #x19 (aref data 1)) "AD type Appearance")
+    (is (= #x41 (aref data 2)))
+    (is (= #x03 (aref data 3)) "0x0341, low octet first")))
+
+(test an-unknown-flag-is-an-error-rather-than-a-silent-zero
+  (signals error (ble:adv-data :flags '(:general-discoverable :nonsense))))

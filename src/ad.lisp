@@ -78,3 +78,81 @@ whose device you are looking at."
                         (loop for i from 0 below (1- (length value)) by 2
                               do (push (u16-le value i) uuids)))))
     (nreverse uuids)))
+
+;;; --- building an advertising payload ------------------------------------
+
+(defconstant +ad-type-flags+       #x01)
+(defconstant +ad-type-appearance+  #x19)
+
+(defparameter +ad-flags+
+  '((:limited-discoverable . #x01)
+    (:general-discoverable . #x02)
+    (:no-bredr             . #x04)   ; LE only, which is nearly always right
+    (:le-bredr-controller  . #x08)
+    (:le-bredr-host        . #x10)))
+
+(defun %ad-record (type value)
+  "One [length][type][value] record."
+  (let* ((value (coerce-octets value))
+         (out (make-octets (+ 2 (length value)))))
+    (setf (aref out 0) (1+ (length value))     ; length covers type + value
+          (aref out 1) type)
+    (replace out value :start1 2)
+    out))
+
+(defun %ad-flag-bits (flags)
+  (let ((bits 0))
+    (dolist (f (if (listp flags) flags (list flags)) bits)
+      (let ((bit (cdr (assoc f +ad-flags+))))
+        (unless bit (error "unknown advertising flag ~S" f))
+        (setf bits (logior bits bit))))))
+
+(defun adv-data (&key flags name (name-complete t) services-16 appearance
+                      manufacturer company-id (max-length 31))
+  "Build an advertising payload from the records a peripheral usually wants.
+
+  (adv-data :flags '(:general-discoverable :no-bredr)
+            :name \"HR Sensor\"
+            :services-16 '(#x180D))
+
+Signals if the result will not fit. That limit is the reason this exists as a
+function rather than as a literal vector in each peripheral: 31 octets is not
+much, the overrun is silent on the wire, and the failure looks like a device
+nobody can see rather than like a payload one record too long.
+
+Advertising the service UUID is what makes a peripheral findable by an app
+that filters for it -- a heart rate monitor that omits 0x180D is invisible to
+every heart rate app, however correct its GATT database."
+  (let ((records '()))
+    (when flags
+      (push (%ad-record +ad-type-flags+ (vector (%ad-flag-bits flags))) records))
+    (when services-16
+      (let ((v (make-octets (* 2 (length services-16)))))
+        (loop for uuid in services-16
+              for i from 0 by 2
+              do (u16le-put v i uuid))
+        (push (%ad-record +ad-type-complete-uuids-16+ v) records)))
+    (when appearance
+      (let ((v (make-octets 2)))
+        (u16le-put v 0 appearance)
+        (push (%ad-record +ad-type-appearance+ v) records)))
+    (when name
+      (push (%ad-record (if name-complete
+                            +ad-type-complete-local-name+
+                            +ad-type-shortened-local-name+)
+                        (map '(simple-array (unsigned-byte 8) (*)) #'char-code name))
+            records))
+    (when manufacturer
+      (let* ((data (coerce-octets manufacturer))
+             (v (make-octets (+ 2 (length data)))))
+        (unless company-id
+          (error "adv-data: manufacturer data needs a company-id"))
+        (u16le-put v 0 company-id)
+        (replace v data :start1 2)
+        (push (%ad-record +ad-type-manufacturer-specific-data+ v) records)))
+    (let ((out (apply #'concatenate '(simple-array (unsigned-byte 8) (*))
+                      (nreverse records))))
+      (when (> (length out) max-length)
+        (error "advertising data is ~D octets, which will not fit in ~D"
+               (length out) max-length))
+      out)))

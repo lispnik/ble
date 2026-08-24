@@ -184,6 +184,7 @@
           gatt-server-mtu
           gatt-server-rx-mtu
           gatt-server-services
+          gatt-server-attributes
           gatt-add-service
           gatt-add-characteristic
           gatt-attribute
@@ -210,6 +211,9 @@
           gatt-notify
           gatt-subscribed-p
           char-properties-bitmap
+          ;; Being a peripheral (src/peripheral.lisp)
+          peripheral-accept
+          serve-peripheral
           ;; Resource-safe wrappers (src/with.lisp)
           with-hci-socket
           with-hci-user-socket

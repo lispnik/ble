@@ -51,6 +51,9 @@
                              (:file "smp-crypto" :depends-on ("ble-package"))
                              (:file "smp" :depends-on ("smp-crypto" "hci-conn"))
                              (:file "bonds" :depends-on ("smp"))
+                             (:file "peripheral" :depends-on ("gatt-server"
+                                                              "hci-conn"
+                                                              "advertiser"))
                              (:file "teardown"   :depends-on ("hci-conn"))
                              ;; last: wraps acquire/release pairs from all of
                              ;; the above

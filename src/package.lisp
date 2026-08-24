@@ -53,6 +53,8 @@
    #:map-ad-records
    #:adv-local-name
    #:adv-service-uuids-16
+   #:adv-data
+   #:+ad-flags+
    ;; MAC addresses (src/mac.lisp). Held on-air, LSB first, everywhere;
    ;; these two are the only place the display order exists.
    #:parse-mac
