@@ -273,6 +273,7 @@
           passkey-bit
           +smp-io-capabilities+
           smp-request-security
+          smp-pairing-requested-p
           smp-peer-addr-type
           smp-session
           smp-session-p

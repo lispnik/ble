@@ -59,6 +59,21 @@
                              ;; the above
                              (:file "with"       :depends-on ("hci-conn" "advertiser"))))))
 
+(asdf:defsystem #:ble/examples
+  :description "Worked examples: peripherals and clients built on ble."
+  :license     "MIT"
+  :version     "0.2.0"
+  :depends-on  (#:ble)
+  ;; Each example lives in its own package and uses only exported symbols.
+  ;; That is the point of them being a system rather than loose scripts: if an
+  ;; example needs a `ble::' symbol, the API has a hole, and loading this is
+  ;; what makes that fail loudly instead of quietly working because the file
+  ;; happened to be read inside the right package.
+  :components ((:module "examples"
+                :components ((:module "heart-rate"
+                              :components ((:file "heart-rate")
+                                           (:file "read-it")))))))
+
 (asdf:defsystem #:ble/io-tests
   :description "Tests for the parts of the I/O layer that need no radio."
   :depends-on  (#:ble #:ble/tests)

@@ -62,6 +62,12 @@ jobs:
       # definition in it, compiles the forms that drive the radios without
       # running them, and asserts on the attribute layout the server builds,
       # all of which is hardware-free.
+      # ble/examples is a system so that this can fail loudly. Loading a file
+      # by hand can succeed for the wrong reason -- the reader picks up
+      # whatever package is current -- while the system fails for a consumer.
+      - name: Build the examples
+        run: make examples
+
       - name: Compile-check the live harness
         run: |
           sbcl --non-interactive --no-userinit --no-sysinit \

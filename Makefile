@@ -2,6 +2,7 @@
 #
 #   make test   -- run the portable suite (needs no Bluetooth)
 #   make check  -- also compile the Linux-only I/O layer
+#   make examples -- load ble/examples and check the heart rate database
 #   make deploy -- copy this tree to a Linux box with radios and rebuild
 #   make clean  -- drop this tree's SBCL fasl cache
 #
@@ -19,7 +20,7 @@ BOOT := --eval "(require :asdf)" \
 HOST ?= pi@rpi4
 DEST ?= ~/ble/
 
-.PHONY: test check deploy clean help
+.PHONY: test check examples deploy clean help
 .DEFAULT_GOAL := test
 
 # ble/core has no dependencies at all, so this runs anywhere.
@@ -36,6 +37,12 @@ check: test
 	  --eval "(format t \"~&ble loaded: ~D exported symbols~%\" \
 	            (let ((n 0)) (do-external-symbols (s :ble) (declare (ignore s)) (incf n)) n))" \
 	  --eval "(sb-ext:exit)"
+
+# The examples cannot be run without a radio, but they must keep building --
+# an example that has quietly stopped compiling is worse than no example. This
+# also asserts the heart rate database's layout, which needs no hardware.
+examples:
+	$(SBCL) $(SBCL_FLAGS) --load examples/heart-rate/compile-check.lisp
 
 # Copy the tree, then DROP THE REMOTE FASL CACHE.
 #

@@ -260,6 +260,15 @@ not stop the rest of the link."
 
 (setf *l2cap-smp-frame-handler* #'%smp-note-frame)
 
+(defun smp-pairing-requested-p (conn)
+  "Has the peer started pairing?
+
+A peripheral cannot initiate pairing, so it waits for this before calling
+SMP-PAIR. Offered as a predicate rather than by exposing the pending queue: the
+queue is a detail of how frames are routed, and a consumer asking whether the
+peer wants to pair should not have to know about it."
+  (and (hci-conn-smp-pending conn) t))
+
 (defun smp-fail (conn reason)
   (ignore-errors (smp-send conn +smp-pairing-failed+ (vector reason)))
   (error 'smp-error :reason reason :source :local))

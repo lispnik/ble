@@ -24,6 +24,9 @@ make test    # portable suite (37 checks); runs anywhere, including macOS
 make check   # also the I/O layer, driven by a scripted peer (104 more)
 ```
 
+`ble/examples` holds the worked examples; it depends on `ble` and nothing
+else depends on it.
+
 ## What it gives you
 
 **Advertising.** Both forms, for the same reason both scan paths exist:
@@ -83,10 +86,27 @@ nothing reported it.
 
 ## Writing a peripheral
 
-`examples/heart-rate/` is a complete one: a Bluetooth heart rate sensor in
-about 150 lines, in its own package using only exported symbols. That last part
-is the test — if an example needs anything from inside `#:ble`, the library has
-not finished the job.
+`ble/examples` is a system of worked ones. `examples/heart-rate/` is a
+complete Bluetooth heart rate sensor in about 150 lines, plus the client that
+reads it — each in its own package, using only exported symbols.
+
+That is why they are a system rather than loose scripts. Loading a file by
+hand can succeed for the wrong reason, since the reader picks up whatever
+package happens to be current; loading the system fails the way it would fail
+for a consumer. Writing these two files found two holes in the API that the
+library's own tests could not: an unexported `gatt-server-attributes`, and a
+peripheral having to rummage in an internal frame queue to ask whether the
+peer wanted to pair — now `smp-pairing-requested-p`.
+
+```sh
+make examples        # build them, and check the heart rate database
+```
+
+```lisp
+(asdf:load-system :ble/examples)
+(heart-rate:run :dev 1)                          ; be a heart rate sensor
+(heart-rate-client:run "DC:95:E3:F9:9E:58")      ; read one
+```
 
 ```lisp
 (ble:with-hci-user-socket (sock (ble:default-hci-dev))

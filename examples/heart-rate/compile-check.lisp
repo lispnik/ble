@@ -6,8 +6,11 @@
 (require :asdf)
 (asdf:initialize-source-registry
  `(:source-registry (:tree ,(truename "./")) :ignore-inherited-configuration))
-(handler-bind ((warning #'muffle-warning)) (asdf:load-system :ble))
-(load (merge-pathnames "examples/heart-rate/heart-rate.lisp" (truename "./")))
+;; Load the SYSTEM, not the file. Loading a file by hand can succeed for the
+;; wrong reason -- the reader picks up whatever package is current -- while
+;; the system fails for a consumer. This is the check that the examples build
+;; the way somebody else would build them.
+(handler-bind ((warning #'muffle-warning)) (asdf:load-system :ble/examples))
 
 (defvar *problems* 0)
 (defun check (ok fmt &rest args)
@@ -56,6 +59,9 @@
            "the measurement is notify-only -- the profile forbids reading it")
     (check (ble:gatt-find-attribute server (1+ h))
            "and has a CCCD after it to subscribe on")))
+
+(check (find-package :heart-rate-client)
+       "the client half loads too")
 
 (format t "~&~%HEART RATE CHECK: ~:[clean~;~:*~D problem(s)~]~%" *problems*)
 (sb-ext:exit :code (if (zerop *problems*) 0 1))
