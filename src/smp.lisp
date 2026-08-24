@@ -34,6 +34,13 @@
 (defconstant +smp-pairing-public-key+  #x0C)
 (defconstant +smp-pairing-dhkey-check+ #x0D)
 (defconstant +smp-security-request+    #x0B)
+(defconstant +smp-identity-information+     #x08)
+(defconstant +smp-identity-address-information+ #x09)
+(defconstant +smp-signing-information+      #x0A)
+
+(defconstant +smp-key-dist-idkey+ #x02
+  "The Identity Key bit in the key distribution fields: the IRK, and the
+identity address that goes with it.")
 
 (defconstant +smp-io-display-only+       #x00)
 (defconstant +smp-io-display-yes-no+     #x01)
@@ -147,34 +154,54 @@ byte-order mistake from a wiring one.")
             (coerce octets 'list))
     (force-output *trace-output*)))
 
+(defun os-random (n)
+  "N random octets from the kernel."
+  (let ((out (make-octets n)))
+    (with-open-file (in "/dev/urandom" :element-type '(unsigned-byte 8))
+      (read-sequence out in))
+    out))
+
 (defun smp-random-octets (sock n)
-  "N random octets from the controller attached to SOCK.
+  "N random octets, from the controller and the kernel XORed together.
+
+Two sources because one of them is not trustworthy. The RTL8761B dongles here
+answer LE Rand with the same values after a reset -- the peripheral drew the
+same `random\' address on four consecutive runs -- and the same controller
+returns a fixed P-256 public key across separate processes. A controller with
+a deterministic RNG at a fixed point in startup is not a thing to derive a
+long-term identity key from.
+
+XOR is the right combiner: the result is as unpredictable as the better of the
+two inputs, so this is no worse than the kernel alone and no worse than the
+controller alone, whichever turns out to be sound. Taking either on its own
+would be a bet.
 
 Takes a socket rather than a connection because an address has to be chosen
 before there is anything to connect with."
-  (let ((out (make-octets n)))
+  (let ((out (make-octets n))
+        (os (os-random n)))
     (loop for off from 0 below n by 8
           do (let ((r (hci-do-command sock +ogf-le+ #x0018 #() :name "LE Rand")))
                (replace out r :start1 off :end1 (min n (+ off 8)))))
-    out))
+    (dotimes (i n out)
+      (setf (aref out i) (logxor (aref out i) (aref os i))))))
 
 (defun smp-random (conn n)
-  "N random octets from the controller's generator.
+  "N random octets for a pairing nonce.
 
-The controller's rather than the Lisp runtime's: these nonces are what stop a
-pairing transcript being replayed, and MAKE-RANDOM-STATE is not a source to
-stake that on."
-  (let ((out (make-octets n)))
-    (loop for off from 0 below n by 8
-          do (let ((r (hci-do-command (hci-conn-sock conn) +ogf-le+ #x0018 #()
-                                      :name "LE Rand")))
-               (replace out r :start1 off :end1 (min n (+ off 8)))))
-    out))
+Controller and kernel XORed, for the reason given at SMP-RANDOM-OCTETS. These
+nonces are what stop a pairing transcript being replayed, so neither the Lisp
+runtime's MAKE-RANDOM-STATE nor a controller that repeats itself after a reset
+is something to stake that on alone."
+  (smp-random-octets (hci-conn-sock conn) n))
 
 (defstruct smp-session
   "One pairing in progress, and the keys it produced."
   conn role local-priv local-x local-y peer-x peer-y
-  na nb local-addr peer-addr local-io peer-io ltk mackey)
+  na nb local-addr peer-addr local-io peer-io ltk mackey
+  ;; What the peer told us about its identity after encryption, and what it
+  ;; will actually be called next time it appears.
+  peer-irk peer-identity-addr peer-identity-addr-type)
 
 ;;; --- addresses ----------------------------------------------------------
 
@@ -249,11 +276,15 @@ not implement."
           (logior +smp-auth-bonding+ +smp-auth-sc+
                   (if mitm +smp-auth-mitm+ 0))))
 
-(defun %send-pairing (conn opcode io &key mitm)
+(defun %send-pairing (conn opcode io &key mitm (distribute-identity t))
   (let ((p (cat (%pairing-params io :mitm mitm)
                 (vector 16       ; max encryption key size
-                        #x00     ; initiator key distribution: none
-                        #x00)))) ; responder key distribution: none
+                        ;; Ask for, and offer, the identity key. Without it a
+                        ;; bond cannot be matched to a peer that comes back
+                        ;; under a resolvable address -- which is what phones
+                        ;; do -- so the stored keys would be unreachable.
+                        (if distribute-identity +smp-key-dist-idkey+ 0)
+                        (if distribute-identity +smp-key-dist-idkey+ 0)))))
     (smp-send conn opcode p)
     ;; What f6 wants is NOT what went on the wire. The wire order of a
     ;; Pairing Request is IO capability, OOB flag, AuthReq; f6 takes the same
@@ -559,19 +590,29 @@ pairing, and Secure Connections has no such indirection."
             ((/= (aref evt 3) 0) (aref evt 3))
             (t (= 1 (aref evt 6)))))))
 
-(defun smp-answer-ltk-request (session event)
-  "Answer an LE Long Term Key Request with the paired key. Peripheral side.
+(defun smp-answer-ltk-request (conn event &key session ltk)
+  "Answer an LE Long Term Key Request. Returns T if a key was supplied.
 
-A key that is not ours gets a negative reply rather than silence: the peer is
-waiting, and refusing tells it to start a fresh pairing instead of timing
-out."
-  (let* ((conn (smp-session-conn session))
-         (sock (hci-conn-sock conn))
-         (handle (u16-le event 4)))
-    (if (and session (smp-session-ltk session))
+The key comes from SESSION when a pairing has just completed, or is passed as
+LTK when the peer is one we remember -- which is the ordinary case, and the reason
+bonding is worth anything: a bonded peer reconnects and goes straight to
+encryption without pairing again.
+
+CONN is separate from SESSION because the interesting case is precisely the
+one where there is no session. This took the session as its first argument and
+dereferenced it before looking, so a returning peer -- the case bonding exists
+for -- crashed it.
+
+A request we cannot answer gets a negative reply rather than silence: it tells
+the peer to start a fresh pairing instead of waiting out a timeout, which is
+what happens when we have forgotten a bond it still holds."
+  (let* ((sock (hci-conn-sock conn))
+         (handle (if (>= (length event) 6) (u16-le event 4) (hci-conn-handle conn)))
+         (ltk (or (and session (smp-session-ltk session)) ltk)))
+    (if ltk
         (let ((params (make-octets 18)))
           (u16le-put params 0 handle)
-          (replace params (msb (smp-session-ltk session)) :start1 2)
+          (replace params (msb ltk) :start1 2)
           (hci-do-command sock +ogf-le+ #x001A params :name "LTK Request Reply")
           t)
         (let ((params (make-octets 2)))
@@ -610,3 +651,72 @@ one-octet mistake."
   (if (and (>= (length connection-complete-event) 9)
            (= 1 (aref connection-complete-event 8)))
       :random :public))
+
+;;; --- identity resolution -------------------------------------------------
+
+(defun resolve-address (mac irk)
+  "Does MAC belong to the device whose identity key is IRK?
+
+MAC is on-air order, IRK in crypto order as it is distributed. A device using
+resolvable addresses publishes a fresh random part and the hash of it under
+its identity key, so this is the only way to tell that two addresses -- and a
+stored bond -- belong to the same peer."
+  (and (resolvable-address-p mac)
+       (equalp (msb (address-hash mac))
+               (smp-ah irk (msb (address-prand mac))))))
+
+(defun generate-rpa (conn irk)
+  "A fresh resolvable private address for this device, on-air order.
+
+Only a peer holding IRK can link it to the previous one, which is the point:
+it stays trackable by devices you have bonded with and by nobody else."
+  (let* ((prand (smp-random conn 3))
+         (mac (make-octets 6)))
+    ;; top two bits 01 marks it resolvable
+    (setf (aref prand 2) (logior #x40 (logand (aref prand 2) #x3F)))
+    (replace mac prand :start1 3)
+    (replace mac (msb (smp-ah irk (msb prand))))
+    mac))
+
+;;; --- key distribution ----------------------------------------------------
+;;;
+;;; After encryption, each side sends whatever it agreed to distribute. For
+;;; Secure Connections the LTK is not sent -- both derived it -- so the
+;;; interesting one is the identity key, which is what makes a bond survive
+;;; the peer changing address.
+
+(defun smp-send-identity (session &key irk identity-addr (identity-addr-type :public))
+  "Send our IRK and the identity address it belongs to."
+  (let ((conn (smp-session-conn session)))
+    (smp-send conn +smp-identity-information+ (msb irk))
+    (smp-send conn +smp-identity-address-information+
+              (cat (vector (ecase identity-addr-type (:public 0) (:random 1)))
+                   identity-addr))))
+
+(defun smp-receive-keys (session &key (timeout-ms 10000))
+  "Collect the keys the peer distributes after encryption.
+
+Returns the session, with PEER-IRK and PEER-IDENTITY-ADDR filled in if the
+peer sent them. A peer that distributes nothing is not an error: it simply
+cannot be recognised later under a new address."
+  (let ((conn (smp-session-conn session))
+        (deadline (+ (get-internal-real-time)
+                     (round (* timeout-ms internal-time-units-per-second) 1000))))
+    (loop
+      (when (and (smp-session-peer-irk session)
+                 (smp-session-peer-identity-addr session))
+        (return session))
+      (when (<= (- deadline (get-internal-real-time)) 0) (return session))
+      (let ((pdu (smp-next conn :timeout-ms 500)))
+        (when (and pdu (vectorp pdu) (plusp (length pdu)))
+          (let ((op (aref pdu 0)))
+            (cond
+              ((and (= op +smp-identity-information+) (>= (length pdu) 17))
+               (setf (smp-session-peer-irk session) (msb (subseq pdu 1 17)))
+               (%trace-value "peer IRK" (smp-session-peer-irk session)))
+              ((and (= op +smp-identity-address-information+) (>= (length pdu) 8))
+               (setf (smp-session-peer-identity-addr-type session)
+                     (if (= 1 (aref pdu 1)) :random :public)
+                     (smp-session-peer-identity-addr session) (subseq pdu 2 8))
+               (%trace-value "peer identity"
+                             (smp-session-peer-identity-addr session))))))))))

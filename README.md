@@ -212,6 +212,47 @@ show it, and one did.
 The published vectors are now in the suite. A constant that cannot be reasoned
 about has to be checked against a source, not recalled.
 
+## Bonds, and peers that change address
+
+`smp-pair` gives you keys; a bond is what makes them worth having. Without one
+a device re-pairs on every connection, which has the security properties of
+never pairing at all.
+
+The hard part is not storage, it is identity. A phone connects from a
+resolvable private address that changes every few minutes, so the address a
+bond was made at is not the address the peer returns on. What links them is
+the identity key the peer distributes: `find-bond` tries every stored IRK
+against the address in front of it, using `resolve-address` (the spec's `ah`,
+checked against its published vector).
+
+Two orderings matter and both were got wrong first:
+
+- **Keys are distributed over the encrypted link**, not as part of pairing.
+  Asking as soon as pairing completes collects nothing, and the bond then gets
+  stored against whatever address the peer happened to use — an address that
+  stops being true within minutes.
+- **`smp-answer-ltk-request` takes the connection, not the session.** The
+  interesting case is a returning peer, where there is no session at all; it
+  answers from a stored bond instead, and sends a *negative* reply when it has
+  neither, so a peer holding a bond we have forgotten starts a fresh pairing
+  rather than waiting out a timeout.
+
+Bonds persist through `*bond-file*` at mode 0600. They are long-term keys in
+plain text; anything stronger needs a passphrase this library has no way to
+ask for.
+
+Verified against a phone: it pairs once, and on later connections arrives at
+an address never seen before, is resolved to its identity through the IRK it
+distributed, and encrypts from the stored key with no pairing prompt.
+
+**A note on randomness.** `smp-random` XORs the controller's `LE Rand` with
+`/dev/urandom`. The RTL8761B dongles here answer LE Rand with the same values
+after a reset — the peripheral drew the same "random" address on five
+consecutive runs — and the same part returns a fixed P-256 public key across
+separate processes. XOR is the right combiner: the result is as unpredictable
+as the better of the two sources, so this is no worse than either alone, where
+choosing one would have been a bet.
+
 ## Streams: connection-oriented channels
 
 `l2cap-coc-connect`, `l2cap-coc-listen` / `l2cap-coc-accept`,

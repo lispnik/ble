@@ -36,6 +36,9 @@
    #:make-octets
    #:coerce-octets
    #:static-random-address
+   #:resolvable-address-p
+   #:address-prand
+   #:address-hash
    #:static-random-address-p
    #:s8
    #:u16-le

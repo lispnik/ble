@@ -29,6 +29,26 @@ audit than a REVERSE buried in an expression."
   (apply #'concatenate '(simple-array (unsigned-byte 8) (*))
          (mapcar #'coerce-octets parts)))
 
+(defun aes-e (key block)
+  "The spec\'s `e\': one AES-128 block, no chaining. KEY and BLOCK are 16
+octets in crypto order."
+  (let ((out (copy-seq (coerce-octets block)))
+        (cipher (ironclad:make-cipher :aes :key (coerce-octets key) :mode :ecb)))
+    (ironclad:encrypt-in-place cipher out)
+    out))
+
+(defun smp-ah (irk prand)
+  "The random address hash: ah(k, r) = e(k, padding || r) mod 2^24.
+
+PRAND is the three-octet random part of a resolvable address, in crypto
+order; the result is the three-octet hash that address carries. This is the
+whole of address resolution -- a device publishes a fresh random part and the
+hash of it under its identity key, and only somebody holding that key can tell
+two of its addresses belong to the same device."
+  (let ((block (make-octets 16)))
+    (replace block (coerce-octets prand) :start1 13)
+    (subseq (aes-e irk block) 13 16)))
+
 (defun smp-f4 (u v x z)
   "The confirm value. U and V are the two public keys' X coordinates (32
 octets each), X the nonce, Z a single octet -- zero for Just Works and

@@ -273,6 +273,11 @@
           smp-session
           smp-session-p
           smp-session-ltk
+          smp-session-peer-irk
+          smp-session-peer-identity-addr
+          smp-session-peer-identity-addr-type
+          smp-send-identity
+          smp-receive-keys
           smp-session-mackey
           smp-start-encryption
           smp-answer-ltk-request
@@ -283,15 +288,38 @@
           *smp-trace*
           smp-random
           smp-random-octets
+          os-random
           smp-f4
           smp-f5
           smp-f6
           smp-g2
           smp-generate-keypair
           smp-dhkey
+          smp-ah
+          aes-e
+          resolve-address
+          generate-rpa
           smp-public-key-valid-p
           aes-cmac
           msb
+          ;; Bonds that outlive the process (src/bonds.lisp)
+          bond
+          bond-p
+          make-bond
+          bond-identity-addr
+          bond-identity-addr-type
+          bond-irk
+          bond-ltk
+          bond-authenticated
+          bond-secure-connections
+          *bonds*
+          *bond-file*
+          save-bonds
+          load-bonds
+          store-bond
+          forget-bond
+          find-bond
+          bond-from-session
           ;; Giving the adapter back (src/teardown.lisp)
           *open-att-channels*
           register-att-channel

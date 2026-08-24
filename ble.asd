@@ -35,7 +35,7 @@
   ;; because the controllers here answer LE Generate DHKey with garbage.
   ;; ble/core stays dependency-free, which is what keeps consumers' protocol
   ;; tests runnable on a machine with no Bluetooth.
-  :depends-on  (#:ble/core #:cffi #:ironclad)
+  :depends-on  (#:ble/core #:cffi #:ironclad #:sb-posix)
   :components ((:module "src"
                 :components ((:file "ble-package")
                              (:file "ffi"        :depends-on ("ble-package"))
@@ -50,6 +50,7 @@
                              (:file "l2cap-coc" :depends-on ("l2cap-signalling"))
                              (:file "smp-crypto" :depends-on ("ble-package"))
                              (:file "smp" :depends-on ("smp-crypto" "hci-conn"))
+                             (:file "bonds" :depends-on ("smp"))
                              (:file "teardown"   :depends-on ("hci-conn"))
                              ;; last: wraps acquire/release pairs from all of
                              ;; the above

@@ -60,3 +60,22 @@ the most significant octet is the last one."
        (not (every #'zerop (list (logand (aref mac 5) #x3F) (aref mac 4)
                                  (aref mac 3) (aref mac 2) (aref mac 1)
                                  (aref mac 0))))))
+
+;;; --- resolvable private addresses ---------------------------------------
+;;;
+;;; On air, LSB first, a resolvable address is hash(3) then prand(3), with the
+;;; top two bits of the most significant octet set to 01. Everything here
+;;; takes and returns on-air order, like every other address in this library,
+;;; and converts at the crypto boundary.
+
+(defun resolvable-address-p (mac)
+  "Is MAC a resolvable private address? On-air order."
+  (and (= 6 (length mac)) (= #x40 (logand (aref mac 5) #xC0))))
+
+(defun address-prand (mac)
+  "The random part of a resolvable address, in on-air order."
+  (subseq (coerce-octets mac) 3 6))
+
+(defun address-hash (mac)
+  "The hash part of a resolvable address, in on-air order."
+  (subseq (coerce-octets mac) 0 3))

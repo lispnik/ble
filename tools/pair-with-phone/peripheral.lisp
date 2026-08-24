@@ -13,6 +13,8 @@
 (in-package #:ble)
 (setf *smp-trace* t *gatt-server-trace* t)
 
+(defvar *our-irk* nil)
+
 (defun env-int (name d)
   (let ((v (sb-ext:posix-getenv name)))
     (if (and v (plusp (length v))) (parse-integer v :junk-allowed t) d)))
@@ -82,7 +84,9 @@ disconnects before anyone gets round to pairing."
     ;; address is a device it has never met, which sidesteps the cache
     ;; entirely. The address is also bound into the pairing keys, so it has to
     ;; be the one handed to SMP-PAIR.
-    (let ((local-addr (static-random-address (smp-random-octets sock 6))))
+    (setf *bond-file* #p"/tmp/ble-phone-bonds.lisp")
+    (let ((local-addr (static-random-address (smp-random-octets sock 6)))
+          (*our-irk* (smp-random-octets sock 16)))
       (set-random-address sock local-addr)
       (format t "~&================================================~%")
       (format t "~&Advertising as ~S on hci~D (~A)~%" *name* +dev+
@@ -90,7 +94,9 @@ disconnects before anyone gets round to pairing."
       (format t "~&Connect, then READ characteristic FFE2 (\"secret\") in~%~
                    service FFE0. It is protected, so the read comes back~%~
                    Insufficient Authentication and the phone will pair.~%")
-      (format t "~&build: one-reader+random-address+gap+gatt~%")
+      (format t "~&build: bonds5+readvertise-fixed~%")
+      (format t "~&~D bond(s) remembered from earlier runs~%"
+              (load-bonds *bond-file*))
       (format t "~&Waiting up to ~D minutes...~%" +minutes+)
       (format t "~&================================================~%")
       (force-output)
@@ -99,7 +105,7 @@ disconnects before anyone gets round to pairing."
       (with-advertising (sock)
         (let ((deadline (+ (get-internal-real-time)
                            (* +minutes+ 60 internal-time-units-per-second)))
-              (conn nil) (session nil) (asked nil))
+              (conn nil) (session nil) (asked nil) (peer-addr nil) (peer-type :public))
           (loop
             (when (> (get-internal-real-time) deadline)
               (format t "~&timed out -- nobody bonded~%") (return))
@@ -107,11 +113,20 @@ disconnects before anyone gets round to pairing."
             ;; files events where hci-take-event can find them. Polling the
             ;; socket here as well made two readers race for the same packets,
             ;; and whichever lost simply never saw them.
+            ;; hci-pump reports a disconnect as :DISCONNECTED and does NOT
+            ;; queue it, so it has to be acted on here. Throwing that return
+            ;; value away is what left the peripheral believing it was still
+            ;; connected: advertising stops the moment a central connects, and
+            ;; without the disconnect nothing ever turned it back on. It sat
+            ;; there invisible.
+            (when (and conn (eq :disconnected (hci-pump conn 60)))
+              (format t "~&phone disconnected; advertising again~%")
+              (force-output)
+              (setf conn nil session nil asked nil)
+              (set-adv-enable sock t))
             (let ((pkt (if conn
-                           (progn (hci-pump conn 60)
-                                  (or (hci-take-event conn :event #x3E :subevent #x05)
-                                      (hci-take-event conn :event #x08)
-                                      (hci-take-event conn :event #x05)))
+                           (or (hci-take-event conn :event #x3E :subevent #x05)
+                               (hci-take-event conn :event #x08))
                            (hci-poll-read sock 200))))
               (when pkt
                 (cond
@@ -121,10 +136,24 @@ disconnects before anyone gets round to pairing."
                         (zerop (aref pkt 4)) (null conn))
                    (let ((peer (subseq pkt 9 15))
                          (ptype (smp-peer-addr-type pkt)))
+                     ;; Keep these where the later branches can see them: the
+                     ;; encryption event arrives in a different clause, and
+                     ;; the bond has to be stored against the peer, not
+                     ;; against whatever is in scope there.
+                     (setf peer-addr peer peer-type ptype)
                      (setf conn (make-hci-conn :sock sock :handle (u16-le pkt 5)
                                                :acl-len (hci-socket-acl-len sock)))
                      (format t "~&connected: ~A (~(~A~) address)~%"
                              (format-mac peer) ptype)
+                     (let ((known (find-bond peer)))
+                       (if known
+                           (format t "~&*** RECOGNISED as the peer bonded at ~
+                                      ~A -- resolved from a~%    changed ~
+                                      address with the identity key it gave ~
+                                      us ***~%"
+                                   (format-mac (bond-identity-addr known)))
+                           (format t "~&not recognised; this will be a fresh ~
+                                      pairing~%")))
                      (force-output)
                      ;; Serve GATT and pair in the same loop; a phone browses
                      ;; the database and bonds in whichever order it likes.
@@ -132,9 +161,21 @@ disconnects before anyone gets round to pairing."
                   ;; the key request that follows the phone starting encryption
                   ((and (>= (length pkt) 5) (= (aref pkt 0) #x04)
                         (= (aref pkt 1) #x3E) (= (aref pkt 3) #x05))
-                   (format t "~&long-term key requested~%") (force-output)
-                   (smp-answer-ltk-request (and (smp-session-p session) session)
-                                           pkt))
+                   ;; Either we have just paired, or this is a peer we
+                   ;; remember coming back -- which is the whole point of a
+                   ;; bond, and needs no pairing at all.
+                   (let* ((known (and (not (smp-session-p session))
+                                      peer-addr (find-bond peer-addr)))
+                          (answered
+                            (smp-answer-ltk-request
+                             conn pkt
+                             :session (and (smp-session-p session) session)
+                             :ltk (and known (bond-ltk known)))))
+                     (format t "~&long-term key requested -- ~A~%"
+                             (cond ((not answered) "we have no key; refused")
+                                   (known "answered from the stored bond")
+                                   (t "answered from the pairing just done")))
+                     (force-output)))
                   ;; encryption result
                   ((and (>= (length pkt) 7) (= (aref pkt 0) #x04)
                         (= (aref pkt 1) #x08))
@@ -146,7 +187,24 @@ disconnects before anyone gets round to pairing."
                        (format t "~&*** LINK ENCRYPTED -- the phone accepted our keys ***~%")
                        (format t "~&encryption failed: status 0x~2,'0X~%" (aref pkt 3)))
                    (force-output)
-                   (when (zerop (aref pkt 3)) (return)))
+                   (when (and (zerop (aref pkt 3)) (smp-session-p session))
+                     ;; NOW the keys can be exchanged: distribution happens on
+                     ;; the encrypted link, which is also why it cannot be
+                     ;; done as part of pairing.
+                     (ignore-errors
+                      (smp-send-identity session :irk *our-irk*
+                                                 :identity-addr local-addr
+                                                 :identity-addr-type :random)
+                      (smp-receive-keys session :timeout-ms 8000))
+                     (let ((b (bond-from-session session :identity-addr peer-addr
+                                                         :identity-addr-type peer-type)))
+                       (store-bond b)
+                       (format t "~&bond stored for ~A~:[ -- NO IRK, so this ~
+                                  peer cannot be recognised at a new address~;~
+                                   (IRK received)~]~%"
+                               (format-mac (bond-identity-addr b))
+                               (bond-irk b))
+                       (force-output))))
                   ((and (>= (length pkt) 4) (= (aref pkt 0) #x04)
                         (= (aref pkt 1) #x05))
                    ;; Connectable advertising stops the moment a central
@@ -195,7 +253,12 @@ disconnects before anyone gets round to pairing."
                         (setf session s)
                         (format t "~&*** PAIRED with the phone ***~%LTK ~{~2,'0X~}~%"
                                 (coerce (smp-session-ltk s) 'list))
-                        (force-output))
+                        (force-output)
+                        ;; Keys are distributed over the ENCRYPTED link, so
+                        ;; not here -- asking now gets nothing, and the bond
+                        ;; would be stored against the address the peer
+                        ;; happens to be using rather than its identity.
+                        )
                     (smp-error (e)
                       (format t "~&PAIRING FAILED: ~A~%" e) (force-output)
                       (setf session (list peer ptype) asked t))))))))))))

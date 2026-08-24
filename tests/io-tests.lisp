@@ -1786,3 +1786,150 @@ then told the link runs at something it does not."
         "the stale update result is gone")
     (is-true (ble:hci-take-event conn :event #x08)
              "and unrelated events are left alone")))
+
+;;; --- resolvable private addresses ---------------------------------------
+
+(test ah-matches-the-published-vector
+  "Address resolution rests entirely on this. From the kernel's self-test,
+reversed into crypto order."
+  (is (equalp (le-vector #xaa #xfb #x0d)
+              (ble:smp-ah (le-vector #x9b #x7d #x39 #x0a #xa6 #x10 #x10 #x34
+                                     #x05 #xad #xc8 #x57 #xa3 #x34 #x02 #xec)
+                          (le-vector #x94 #x81 #x70)))))
+
+(test aes-e-matches-the-fips-vector
+  "The single-block cipher ah is built on."
+  (is (equalp (hex->octets "69c4e0d86a7b0430d8cdb78070b4c55a")
+              (ble:aes-e (hex->octets "000102030405060708090a0b0c0d0e0f")
+                         (hex->octets "00112233445566778899aabbccddeeff")))))
+
+(test a-resolvable-address-is-recognised-by-its-top-bits
+  (is-true (ble:resolvable-address-p #(1 2 3 4 5 #x40)))
+  (is-true (ble:resolvable-address-p #(1 2 3 4 5 #x7F)))
+  (is-false (ble:resolvable-address-p #(1 2 3 4 5 #xC0))
+            "that is a static random address, not a resolvable one")
+  (is-false (ble:resolvable-address-p #(1 2 3 4 5 #x00))
+            "and neither is a public one"))
+
+(test an-address-resolves-only-under-its-own-identity-key
+  "The whole point: two addresses from one device are linkable by the holder
+of its identity key and by nobody else."
+  (let* ((irk (ble:make-octets 16))
+         (other (ble:make-octets 16)))
+    (dotimes (i 16) (setf (aref irk i) (+ 1 i) (aref other i) (+ 100 i)))
+    ;; build an address the way a device would
+    (let* ((prand (ble:coerce-octets #(#x11 #x22 #x43)))   ; top bits 01
+           (mac (ble:make-octets 6)))
+      (replace mac prand :start1 3)
+      (replace mac (ble:msb (ble:smp-ah irk (ble:msb prand))))
+      (is-true (ble:resolvable-address-p mac) "it is a resolvable address")
+      (is-true (ble:resolve-address mac irk) "and resolves under its own IRK")
+      (is-false (ble:resolve-address mac other)
+                "but not under anyone else's")
+      ;; a second address from the same device is unlinkable without the key
+      (let* ((prand2 (ble:coerce-octets #(#x99 #x88 #x77)))
+             (mac2 (ble:make-octets 6)))
+        (replace mac2 prand2 :start1 3)
+        (replace mac2 (ble:msb (ble:smp-ah irk (ble:msb prand2))))
+        (is (not (equalp mac mac2)) "the two addresses differ")
+        (is-true (ble:resolve-address mac2 irk)
+                 "and both resolve to the same device for the key holder")))))
+
+(test a-public-address-never-resolves
+  (is-false (ble:resolve-address #(1 2 3 4 5 6) (ble:make-octets 16))
+            "resolution is only meaningful for a resolvable address"))
+
+;;; --- bonds --------------------------------------------------------------
+
+(defun temp-bond-file ()
+  (merge-pathnames (format nil "ble-bonds-~D.lisp" (random 100000))
+                   #p"/tmp/"))
+
+(defmacro with-clean-bonds ((path) &body body)
+  `(let ((ble:*bonds* '()) (,path (temp-bond-file)))
+     (unwind-protect (progn ,@body)
+       (ignore-errors (delete-file ,path)))))
+
+(test a-bond-survives-a-round-trip-through-a-file
+  "The whole point of bonding: pair once, not on every connection. A device
+that re-pairs each time has the security properties of one that never pairs."
+  (with-clean-bonds (path)
+    (let ((ble:*bond-file* path))
+      (ble:store-bond (ble:make-bond :identity-addr (hex->octets "010203040506")
+                                     :identity-addr-type :public
+                                     :irk (hex->octets "000102030405060708090a0b0c0d0e0f")
+                                     :ltk (hex->octets "0f0e0d0c0b0a09080706050403020100")))
+      (is (= 1 (length ble:*bonds*)))
+      ;; forget everything in memory, then read it back
+      (setf ble:*bonds* '())
+      (is (= 1 (ble:load-bonds path)))
+      (let ((b (first ble:*bonds*)))
+        (is (equalp (hex->octets "010203040506") (ble:bond-identity-addr b)))
+        (is (equalp (hex->octets "0f0e0d0c0b0a09080706050403020100")
+                    (ble:bond-ltk b)) "the long-term key survives verbatim")
+        (is (equalp (hex->octets "000102030405060708090a0b0c0d0e0f")
+                    (ble:bond-irk b)))))))
+
+(test a-bond-is-found-through-a-changed-address
+  "The hard part is identity, not storage. A phone arrives at a different
+resolvable address every few minutes, and the only thing linking them to a
+stored bond is the identity key it distributed once."
+  (with-clean-bonds (path)
+    (let* ((ble:*bond-file* path)
+           (irk (hex->octets "0102030405060708090a0b0c0d0e0f10")))
+      (ble:store-bond (ble:make-bond :identity-addr (hex->octets "AABBCCDDEEFF")
+                                     :irk irk
+                                     :ltk (ble:make-octets 16)))
+      ;; two different addresses the same device might appear at
+      (dolist (prand (list (ble:coerce-octets #(#x11 #x22 #x43))
+                           (ble:coerce-octets #(#xAB #xCD #x5E))))
+        (let ((mac (ble:make-octets 6)))
+          (replace mac prand :start1 3)
+          (replace mac (ble:msb (ble:smp-ah irk (ble:msb prand))))
+          (let ((found (ble:find-bond mac)))
+            (is-true found "the bond is found at a resolvable address")
+            (when found
+              (is (equalp (hex->octets "AABBCCDDEEFF")
+                          (ble:bond-identity-addr found))
+                  "and identifies the peer by who it is, not where it was")))))
+      ;; an address belonging to nobody we know
+      (is (null (ble:find-bond (hex->octets "010203040540")))
+          "an unrelated resolvable address matches nothing"))))
+
+(test re-pairing-replaces-the-old-keys
+  "A stale entry that still matches an address sends us looking for a key the
+peer has forgotten, which fails in a way that looks like the peer's fault."
+  (with-clean-bonds (path)
+    (let ((ble:*bond-file* path)
+          (addr (hex->octets "010203040506")))
+      (ble:store-bond (ble:make-bond :identity-addr addr
+                                     :ltk (hex->octets "11111111111111111111111111111111")))
+      (ble:store-bond (ble:make-bond :identity-addr addr
+                                     :ltk (hex->octets "22222222222222222222222222222222")))
+      (is (= 1 (length ble:*bonds*)) "one bond per identity, not two")
+      (is (equalp (hex->octets "22222222222222222222222222222222")
+                  (ble:bond-ltk (first ble:*bonds*)))
+          "and it is the new key"))))
+
+(test forgetting-a-bond-removes-it-from-the-file-too
+  (with-clean-bonds (path)
+    (let ((ble:*bond-file* path)
+          (addr (hex->octets "010203040506")))
+      (ble:store-bond (ble:make-bond :identity-addr addr :ltk (ble:make-octets 16)))
+      (is-true (ble:forget-bond addr))
+      (setf ble:*bonds* '())
+      (is (= 0 (ble:load-bonds path)) "gone from the file, not just from memory")
+      (is-false (ble:forget-bond addr) "and forgetting it again reports nothing"))))
+
+(test loading-from-a-file-that-does-not-exist-is-not-an-error
+  "It just means nothing has been paired yet."
+  (let ((ble:*bonds* '()))
+    (is (= 0 (ble:load-bonds #p"/tmp/ble-bonds-definitely-absent-99999.lisp")))))
+
+(test os-random-is-not-obviously-broken
+  "A weak source here is not detectable by testing, but the obvious failures
+are: a constant, or a short read leaving zeros."
+  (let ((a (ble:os-random 32)) (b (ble:os-random 32)))
+    (is (= 32 (length a)))
+    (is (not (equalp a b)) "two draws must differ")
+    (is (notevery #'zerop a) "and must not be all zero")))
