@@ -101,6 +101,21 @@ one file. Temperatures are also IEEE-11073 FLOATs rather than integers —
 decimal, so 36.85 °C is exactly 3685 × 10⁻², which binary floating point
 cannot say.
 
+`examples/glucose/` stops being a sensor. A meter is a database: its readings
+were taken hours ago, and a client asks for them by writing a query to the
+Record Access Control Point — one write starts a procedure, the records stream
+back as notifications on a *different* characteristic, and an indication ends
+it. The distinction it is built around is that refusing a write and failing a
+procedure are different things, and a client that confuses them waits forever
+for a reply that was already refused. It is also the first example requiring
+an encrypted link, on both sides: the client pairs as a central before it can
+subscribe to anything.
+
+`examples/environmental-sensing/` is the smallest, and exists for one property
+the others do not have — a service carrying the same characteristic more than
+once. Three Temperatures, all `0x2A6E`, told apart only by their descriptors.
+Look one up by UUID and you have silently picked one of three.
+
 That is why they are a system rather than loose scripts. Loading a file by
 hand can succeed for the wrong reason, since the reader picks up whatever
 package happens to be current; loading the system fails the way it would fail
@@ -110,10 +125,14 @@ peripheral having to rummage in an internal frame queue to ask whether the
 peer wanted to pair — now `smp-pairing-requested-p`. The thermometer found two
 more: there was no way to add a descriptor other than a CCCD, which Health
 Thermometer requires (`gatt-add-descriptor`), and no way for a peripheral to
-notice its indication had been confirmed (`+att-handle-value-cfm+`).
+notice its indication had been confirmed (`+att-handle-value-cfm+`). The
+glucose meter found that an `on-write` handler had no name for the ATT error
+it returns, and the weather station that `find-char-by-uuid` quietly returns
+the first of several — now `find-chars-by-uuid`, with the singular one's
+docstring saying what it does.
 
 ```sh
-make examples        # build them, and check both databases
+make examples        # build them, and check every database
 ```
 
 ```lisp
@@ -122,6 +141,8 @@ make examples        # build them, and check both databases
 (heart-rate-client:run "DC:95:E3:F9:9E:58")      ; read one
 (health-thermometer:run :dev 1)                  ; be a thermometer
 (health-thermometer-client:run "DC:95:E3:F9:9E:58")
+(glucose:run :dev 1)                             ; be a glucose meter
+(environmental-sensing:run :dev 1)               ; be a weather station
 ```
 
 ```lisp

@@ -913,8 +913,23 @@ since ATT has no other notion of membership."
     (nreverse chars)))
 
 (defun find-char-by-uuid (chars uuid)
-  "The GATT-CHAR in CHARS whose UUID matches UUID (ATT wire order), or NIL."
+  "The FIRST GATT-CHAR in CHARS whose UUID matches UUID (ATT wire order), or
+NIL.
+
+`First' matters. A service may carry several instances of one characteristic
+-- an Environmental Sensing service commonly has three Temperatures, indoor,
+outdoor and probe -- and this hands back one of them with no sign that the
+others exist. Use FIND-CHARS-BY-UUID when there may be more than one."
   (find (coerce-octets uuid) chars :key #'gatt-char-uuid :test #'equalp))
+
+(defun find-chars-by-uuid (chars uuid)
+  "Every GATT-CHAR in CHARS whose UUID matches UUID, in handle order.
+
+The instances are told apart by their descriptors rather than by anything in
+the characteristic itself: a Characteristic User Description (0x2901) names
+one for a person, and an ES Measurement (0x290C) says what it samples."
+  (remove-if-not (lambda (c) (equalp (coerce-octets uuid) (gatt-char-uuid c)))
+                 chars))
 
 (defun char-handle-by-uuid (chars uuid-le)
   "Value handle of the characteristic whose UUID matches UUID-LE, or NIL."

@@ -96,6 +96,10 @@
           uuid16
           uuid-string
           gatt-char
+          ;; The constructor as well as the accessors: a consumer
+          ;; testing its own client code needs to build one without
+          ;; a radio to discover it from.
+          make-gatt-char
           gatt-char-p
           gatt-char-handle
           gatt-char-properties
@@ -103,6 +107,7 @@
           gatt-char-uuid-string
           gatt-char-property-names
           find-char-by-uuid
+          find-chars-by-uuid
           char-handle-by-uuid
           att-test-channel
           att-test-channel-p

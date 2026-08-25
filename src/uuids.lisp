@@ -26,6 +26,7 @@
 (defconstant +service-heart-rate+         #x180D)
 (defconstant +service-health-thermometer+ #x1809)
 (defconstant +service-glucose+            #x1808)
+(defconstant +service-environmental-sensing+ #x181A)
 
 ;;; Vendor services are deliberately absent. The Nordic UART Service, for one,
 ;;; is a 128-bit UUID and has no 16-bit form -- writing a short one here would
@@ -45,6 +46,12 @@
 (defconstant +char-firmware-revision+     #x2A26)
 ;; Battery
 (defconstant +char-battery-level+         #x2A19)
+;; Environmental Sensing. Any of these may appear more than once in one
+;; service -- three Temperatures for indoor, outdoor and a probe is the
+;; ordinary case -- so a client cannot look them up by UUID and stop.
+(defconstant +char-temperature+ #x2A6E)
+(defconstant +char-humidity+    #x2A6F)
+(defconstant +char-pressure+    #x2A6D)
 ;; Glucose
 (defconstant +char-glucose-measurement+         #x2A18)
 (defconstant +char-glucose-measurement-context+ #x2A34)
@@ -69,7 +76,10 @@
 ;;; +GATT-CCCD+, and two names for one number is the drift that named
 ;;; constants exist to prevent.
 
+(defconstant +descriptor-user-description+ #x2901)
+(defconstant +descriptor-presentation-format+ #x2904)
 (defconstant +descriptor-valid-range+ #x2906)
+(defconstant +descriptor-es-measurement+ #x290C)
 
 ;;; --- appearance ---------------------------------------------------------
 ;;;

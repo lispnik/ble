@@ -62,6 +62,7 @@
    #:+service-heart-rate+
    #:+service-health-thermometer+
    #:+service-glucose+
+   #:+service-environmental-sensing+
    #:+char-device-name+
    #:+char-appearance+
    #:+char-service-changed+
@@ -70,6 +71,9 @@
    #:+char-serial-number+
    #:+char-firmware-revision+
    #:+char-battery-level+
+   #:+char-temperature+
+   #:+char-humidity+
+   #:+char-pressure+
    #:+char-glucose-measurement+
    #:+char-glucose-measurement-context+
    #:+char-glucose-feature+
@@ -92,7 +96,10 @@
    #:appearance
    #:service-changed-range
    #:date-time
+   #:+descriptor-user-description+
+   #:+descriptor-presentation-format+
    #:+descriptor-valid-range+
+   #:+descriptor-es-measurement+
    #:+ad-flags+
    ;; MAC addresses (src/mac.lisp). Held on-air, LSB first, everywhere;
    ;; these two are the only place the display order exists.
