@@ -112,6 +112,7 @@
    #:+descriptor-valid-range+
    #:+descriptor-es-measurement+
    #:+ad-flags+
+   #:+ad-type-complete-uuids-128+
    ;; MAC addresses (src/mac.lisp). Held on-air, LSB first, everywhere;
    ;; these two are the only place the display order exists.
    #:parse-mac

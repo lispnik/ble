@@ -49,6 +49,7 @@ examples:
 	$(SBCL) $(SBCL_FLAGS) --load examples/environmental-sensing/compile-check.lisp
 	$(SBCL) $(SBCL_FLAGS) --load examples/object-transfer/compile-check.lisp
 	$(SBCL) $(SBCL_FLAGS) --load examples/nordic-uart/compile-check.lisp
+	$(SBCL) $(SBCL_FLAGS) --load examples/broadcaster/compile-check.lisp
 
 # Copy the tree, then DROP THE REMOTE FASL CACHE.
 #

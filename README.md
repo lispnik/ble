@@ -138,6 +138,20 @@ points, and the bytes go over the channel. Ask to read without opening the
 channel first and you are refused with Channel Unavailable, because the server
 has nowhere to put the answer.
 
+`examples/nordic-uart/` is a serial port, and the first example that is not a
+SIG profile at all — NUS is Nordic's, and it is here because so many vendor
+devices speak it. It is also the first with **128-bit UUIDs**, which is what
+`ble:uuid128` exists for: the wire form is the reverse of the written form, so
+a hand-reversed sixteen-octet literal cannot be reviewed. The naming trap gets
+its own assertions — a host *writes* to RX and *reads* notifications from TX,
+because the names are the device's point of view.
+
+`examples/broadcaster/` never accepts a connection at all. The advertisement
+*is* the message, and it uses **extended advertising** to get past two legacy
+limits: 31 octets of payload (it sends 42, including the full NUS UUID that
+the UART example cannot fit) and 1M-only (it can advertise on the **Coded
+PHY**). `examples/scanner/` is the other half and hears both.
+
 That is why they are a system rather than loose scripts. Loading a file by
 hand can succeed for the wrong reason, since the reader picks up whatever
 package happens to be current; loading the system fails the way it would fail
@@ -168,6 +182,8 @@ make examples        # build them, and check every database
 (glucose:run :dev 1)                             ; be a glucose meter
 (environmental-sensing:run :dev 1)               ; be a weather station
 (object-transfer:run :dev 1)                     ; serve objects over L2CAP
+(nordic-uart:run :dev 1)                         ; a serial port over BLE
+(broadcaster:run :dev 1 :phy :coded)             ; a long-range beacon
 ```
 
 ```lisp

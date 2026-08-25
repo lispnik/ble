@@ -91,7 +91,9 @@
                                            (:file "read-it")))
                              (:module "nordic-uart"
                               :components ((:file "nordic-uart")
-                                           (:file "read-it")))))))
+                                           (:file "read-it")))
+                             (:module "broadcaster"
+                              :components ((:file "broadcaster")))))))
 
 (asdf:defsystem #:ble/io-tests
   :description "Tests for the parts of the I/O layer that need no radio."

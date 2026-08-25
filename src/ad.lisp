@@ -56,6 +56,7 @@ whose device you are looking at."
 (defconstant +ad-type-complete-local-name+  #x09)
 (defconstant +ad-type-incomplete-uuids-16+  #x02)
 (defconstant +ad-type-complete-uuids-16+    #x03)
+(defconstant +ad-type-complete-uuids-128+   #x07)
 
 (defun adv-local-name (data)
   "The complete (0x09) or shortened (0x08) local name in DATA, or NIL."
@@ -107,8 +108,8 @@ whose device you are looking at."
         (unless bit (error "unknown advertising flag ~S" f))
         (setf bits (logior bits bit))))))
 
-(defun adv-data (&key flags name (name-complete t) services-16 appearance
-                      manufacturer company-id (max-length 31))
+(defun adv-data (&key flags name (name-complete t) services-16 services-128
+                      appearance manufacturer company-id (max-length 31))
   "Build an advertising payload from the records a peripheral usually wants.
 
   (adv-data :flags '(:general-discoverable :no-bredr)
@@ -119,6 +120,11 @@ Signals if the result will not fit. That limit is the reason this exists as a
 function rather than as a literal vector in each peripheral: 31 octets is not
 much, the overrun is silent on the wire, and the failure looks like a device
 nobody can see rather than like a payload one record too long.
+
+SERVICES-128 takes UUIDs in ATT wire order -- BLE:UUID128 produces them --
+and is where the 31-octet limit bites: one 128-bit UUID costs eighteen
+octets, so a vendor service and a name together do not fit. Raise MAX-LENGTH
+to 251 when advertising it through an extended advertising set.
 
 Advertising the service UUID is what makes a peripheral findable by an app
 that filters for it -- a heart rate monitor that omits 0x180D is invisible to
@@ -132,6 +138,15 @@ every heart rate app, however correct its GATT database."
               for i from 0 by 2
               do (u16le-put v i uuid))
         (push (%ad-record +ad-type-complete-uuids-16+ v) records)))
+    (when services-128
+      ;; Sixteen octets each, plus two of header. One of these and a name is
+      ;; already most of a legacy advertisement, which is why vendor devices
+      ;; are usually found by name and why MAX-LENGTH is worth raising when
+      ;; the controller supports extended advertising.
+      (push (%ad-record +ad-type-complete-uuids-128+
+                        (apply #'concatenate '(simple-array (unsigned-byte 8) (*))
+                               (mapcar #'coerce-octets services-128)))
+            records))
     (when appearance
       (let ((v (make-octets 2)))
         (u16le-put v 0 appearance)
