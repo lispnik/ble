@@ -6,7 +6,7 @@ A Bluetooth Low Energy library for SBCL on Linux: HCI sockets, adapter
 enumeration, LE scanning, extended advertising, and an ATT/GATT client that
 speaks over either of two transports.
 
-## Trippy Demo
+## Trippy Demo 🍄
 
 `examples/lisp-repl/` is a Common Lisp REPL reachable over Bluetooth, and
 `(lisp-repl-client:demo "AA:BB:...")` runs a scripted tour of it. What follows
