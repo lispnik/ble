@@ -68,17 +68,17 @@ iOS reads Device Name and Appearance the moment it connects."
 
 ;;; --- one connection's worth of state ------------------------------------
 
-(defstruct link
-  "What the hooks need to remember between ticks."
-  peer peer-type session asked local-addr irk)
+;;; --- what the run reports -----------------------------------------------
+;;;
+;;; The sequencing -- ask, answer the controller's key request, distribute
+;;; identity after Encryption Change, store the bond -- used to be written out
+;;; here, and again in examples/glucose/. It is BLE:SERVE-PERIPHERAL's now,
+;;; driven from a BLE:PERIPHERAL-PAIRING. What is left in this file is what
+;;; this file is actually for: saying out loud what the phone did, because
+;;; that is the evidence the exchange interoperates with a stack somebody else
+;;; wrote.
 
-(defun on-connect (state server conn peer ptype)
-  (declare (ignore conn))
-  (setf (link-peer state) peer
-        (link-peer-type state) ptype
-        (link-session state) nil
-        (link-asked state) nil)
-  (setf (ble:gatt-server-encrypted server) nil)
+(defun report-connect (peer ptype)
   (format t "~&connected: ~A (~(~A~) address)~%" (ble:format-mac peer) ptype)
   (let ((known (ble:find-bond peer)))
     (if known
@@ -88,98 +88,23 @@ iOS reads Device Name and Appearance the moment it connects."
         (format t "~&not recognised; this will be a fresh pairing~%")))
   (force-output))
 
-(defun handle-key-request (state server event conn)
-  "Answer the controller's Long Term Key Request.
-
-Either a pairing has just finished, or this is a peer we remember coming back
--- which needs no pairing at all, and is the whole point of a bond."
-  (let* ((session (link-session state))
-         (known (and (not (ble:smp-session-p session))
-                     (link-peer state)
-                     (ble:find-bond (link-peer state))))
-         (answered (ble:smp-answer-ltk-request
-                    conn event
-                    :session (and (ble:smp-session-p session) session)
-                    :ltk (and known (ble:bond-ltk known)))))
-    (declare (ignore server))
-    (format t "~&long-term key requested -- ~A~%"
-            (cond ((not answered) "we have no key; refused")
-                  (known "answered from the stored bond")
-                  (t "answered from the pairing just done")))
-    (force-output)))
-
-(defun handle-encryption (state server event conn)
-  "Encryption Change. Keys are distributed over the encrypted link, so this is
-where the identity exchange belongs -- doing it when pairing returns collects
-nothing and stores a bond against an address that expires within minutes."
-  (let ((ok (and (zerop (aref event 3)) (= 1 (aref event 6)))))
-    (format t "~&~:[encryption failed: status 0x~2,'0X~;*** LINK ENCRYPTED -- ~
-               the phone accepted our keys ***~]~%"
-            ok (aref event 3))
-    (force-output)
-    (when ok
-      (setf (ble:gatt-server-encrypted server) t)
-      (let ((session (link-session state)))
-        (when (ble:smp-session-p session)
-          (ignore-errors
-           (ble:smp-send-identity session :irk (link-irk state)
-                                          :identity-addr (link-local-addr state)
-                                          :identity-addr-type :random)
-           (ble:smp-receive-keys session :timeout-ms 8000))
-          (let ((b (ble:bond-from-session
-                    session :identity-addr (link-peer state)
-                            :identity-addr-type (link-peer-type state))))
-            (ble:store-bond b)
-            (format t "~&bond stored for ~A~:[ -- NO IRK, so this peer cannot ~
-                       be recognised at a new address~; (IRK received)~]~%"
-                    (ble:format-mac (ble:bond-identity-addr b))
-                    (ble:bond-irk b))
-            (force-output)))))
-    (declare (ignorable conn))))
-
-(defun on-tick (state server conn)
-  "Ask once, then answer whatever the request provokes.
-
-Events are claimed from the queue rather than read off the socket: SERVE-
-PERIPHERAL is already the only reader, and a second one racing it would mean
-whichever lost never saw the packet."
-  (unless (link-asked state)
-    (setf (link-asked state) t)
-    (format t "~&asking the phone to pair...~%") (force-output)
-    (ble:smp-request-security conn))
-  (let ((ltk (ble:hci-take-event conn :event #x3E :subevent #x05)))
-    (when ltk (handle-key-request state server ltk conn)))
-  (let ((enc (ble:hci-take-event conn :event #x08)))
-    (when (and enc (>= (length enc) 7)) (handle-encryption state server enc conn)))
-  ;; A Pairing Request from the phone arrives on the SMP channel.
-  (when (and (ble:smp-pairing-requested-p conn)
-             (not (ble:smp-session-p (link-session state))))
-    (handler-case
-        (let ((s (ble:smp-pair conn :role :peripheral
-                                    :local-addr (link-local-addr state)
-                                    :local-addr-type :random
-                                    :peer-addr (link-peer state)
-                                    :peer-addr-type (link-peer-type state)
-                                    :timeout-ms 60000)))
-          (setf (link-session state) s)
-          (format t "~&*** PAIRED with the phone ***~%LTK ~{~2,'0X~}~%"
-                  (coerce (ble:smp-session-ltk s) 'list))
-          (force-output))
-      (ble:smp-error (e)
-        (format t "~&~A~%" e) (force-output)
-        ;; Hold the link a moment so the Pairing Failed we just sent actually
-        ;; leaves the controller; tearing down now discards it and the peer
-        ;; reports a timeout instead of the reason we gave it.
-        (dotimes (i 20) (ble:hci-pump conn 100))
-        (setf (link-asked state) t)))))
-
-;;; --- running it ---------------------------------------------------------
+(defun report-paired (conn session bond)
+  (declare (ignore conn))
+  (format t "~&*** LINK ENCRYPTED -- the phone accepted our keys ***~%")
+  (when (ble:smp-session-p session)
+    (format t "~&LTK ~{~2,'0X~}~%" (coerce (ble:smp-session-ltk session) 'list)))
+  (if bond
+      (format t "~&bond stored for ~A~:[ -- NO IRK, so this peer cannot be ~
+                 recognised at a new address~; (IRK received)~]~%"
+              (ble:format-mac (ble:bond-identity-addr bond)) (ble:bond-irk bond))
+      (format t "~&no bond stored~%"))
+  (force-output))
 
 (defun run (&key (dev (env-int "PERIPH_DEV" 1)) (minutes (env-int "MINUTES" 5)))
   (ble:install-adapter-teardown)
   (setf ble:*bond-file* *bond-file*)
   (let ((server (build-server))
-        (state (make-link)))
+        (pairing nil))
     (ble:with-hci-user-socket (sock dev)
       ;; A fresh static random address each run. Clients cache a GATT database
       ;; by address and only re-discover on a Service Changed indication from a
@@ -187,10 +112,12 @@ whichever lost never saw the packet."
       ;; shown its old database forever. A new address is a device the phone
       ;; has never met. It is bound into the pairing keys, so SMP-PAIR gets the
       ;; same one.
-      (setf (link-local-addr state) (ble:static-random-address
-                                     (ble:smp-random-octets sock 6))
-            (link-irk state) (ble:smp-random-octets sock 16))
-      (ble:set-random-address sock (link-local-addr state))
+      (setf pairing (ble:make-peripheral-pairing
+                     :local-addr (ble:static-random-address
+                                  (ble:smp-random-octets sock 6))
+                     :irk (ble:smp-random-octets sock 16)
+                     :on-paired #'report-paired))
+      (ble:set-random-address sock (ble:peripheral-pairing-local-addr pairing))
       (ble:set-adv-parameters sock :adv-type ble:+adv-ind+ :own-addr-type 1)
       (ble:set-adv-data sock (ble:adv-data
                               :flags '(:general-discoverable :no-bredr)
@@ -202,20 +129,22 @@ whichever lost never saw the packet."
                  ~D bond(s) remembered from earlier runs~%~
                  Waiting up to ~D minutes...~%~
                  ================================================~%"
-              *name* dev (ble:format-mac (link-local-addr state))
+              *name* dev (ble:format-mac (ble:peripheral-pairing-local-addr pairing))
               (ble:load-bonds *bond-file*) minutes)
       (force-output)
       (ble:serve-peripheral
        server sock :seconds (* 60 minutes)
+       :pairing pairing
        :on-connect (lambda (conn peer ptype)
-                     (on-connect state server conn peer ptype))
+                     (declare (ignore conn))
+                     (report-connect peer ptype))
        :on-disconnect (lambda (conn)
                         (declare (ignore conn))
                         (format t "~&phone disconnected; advertising again~%")
                         (force-output))
-       :on-tick (lambda (conn request)
-                  (declare (ignore request))
-                  (on-tick state server conn))))))
+       ;; No ON-TICK at all any more: pairing is the library's, and this
+       ;; harness has nothing else to do while it happens.
+       ))))
 
 (run)
 (sb-ext:exit)

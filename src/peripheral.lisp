@@ -48,7 +48,127 @@ peripheral nobody can connect to."
                     (subseq pkt 9 15)
                     (if (= 1 (aref pkt 8)) :random :public))))))))
 
+;;; --- pairing ------------------------------------------------------------
+;;;
+;;; A peripheral cannot start pairing. All it can do is ask, and require
+;;; security on something the central already wants; the central decides. What
+;;; follows is not much logic, but it is exact, and getting the order wrong
+;;; fails in ways that look like something else:
+;;;
+;;;   - The Long Term Key Request arrives from the CONTROLLER, not the peer,
+;;;     and must be answered from the session just negotiated or from a stored
+;;;     bond. Unanswered, the link simply never encrypts and the central gives
+;;;     up without saying why.
+;;;
+;;;   - Keys are distributed OVER the encrypted link, so the identity exchange
+;;;     belongs after Encryption Change and not when SMP-PAIR returns.
+;;;     Collecting them earlier stores a bond against an address that expires
+;;;     within minutes, and the peer is then a stranger the next time.
+;;;
+;;; This was written out by hand in two places before it lived here, and the
+;;; second copy was already drifting from the first.
+
+(defstruct (peripheral-pairing (:constructor make-peripheral-pairing
+                                   (&key local-addr (local-addr-type :random)
+                                         irk (io-capability :no-input-no-output)
+                                         passkey (request t) (bond t)
+                                         on-paired)))
+  "How a peripheral should handle pairing, and what it learned doing it.
+
+LOCAL-ADDR is the address being advertised, and is not optional: it is bound
+into the pairing crypto, so a peripheral that pairs as one address while
+advertising another produces confirm values the peer cannot verify. IRK, when
+given, is distributed so a bonded peer can recognise this device at a rotated
+address.
+
+REQUEST asks the central to pair as soon as it connects. BOND distributes and
+stores keys once the link is encrypted. ON-PAIRED, if given, is called with
+(CONN SESSION BOND) after encryption succeeds -- BOND is NIL when bonding is
+off or the peer sent no identity.
+
+SESSION and PEER are filled in as a connection proceeds and reset for the
+next one."
+  local-addr local-addr-type irk io-capability passkey request bond on-paired
+  peer peer-type session asked)
+
+(defun %pairing-reset (p peer peer-type)
+  (setf (peripheral-pairing-peer p) peer
+        (peripheral-pairing-peer-type p) peer-type
+        (peripheral-pairing-session p) nil
+        (peripheral-pairing-asked p) nil))
+
+(defun %pairing-collect-keys (p conn)
+  "After encryption: distribute our identity, take the peer's, store a bond."
+  (let ((session (peripheral-pairing-session p)))
+    (when (and (peripheral-pairing-bond p) (smp-session-p session))
+      (ignore-errors
+       (smp-send-identity session
+                          :irk (peripheral-pairing-irk p)
+                          :identity-addr (peripheral-pairing-local-addr p)
+                          :identity-addr-type (peripheral-pairing-local-addr-type p))
+       (smp-receive-keys session :timeout-ms 8000)
+       (let ((b (bond-from-session
+                 session
+                 :identity-addr (peripheral-pairing-peer p)
+                 :identity-addr-type (peripheral-pairing-peer-type p))))
+         (store-bond b)
+         (return-from %pairing-collect-keys b))))
+    nil))
+
+(defun %drive-pairing (p server conn)
+  "One tick's worth of pairing. Called from SERVE-PERIPHERAL.
+
+Events are claimed from the connection's queue rather than read from the
+socket, because HCI-PUMP is the only reader and a second one would race it."
+  ;; Ask, once per connection.
+  (unless (peripheral-pairing-asked p)
+    (setf (peripheral-pairing-asked p) t)
+    (when (peripheral-pairing-request p)
+      (ignore-errors (smp-request-security conn))))
+  ;; The controller wants a key: either from the pairing just done, or from a
+  ;; bond, which is a peer we already know coming back and needs no pairing.
+  (let ((ltk (hci-take-event conn :event #x3E :subevent #x05)))
+    (when ltk
+      (let* ((session (peripheral-pairing-session p))
+             (known (and (not (smp-session-p session))
+                         (peripheral-pairing-peer p)
+                         (find-bond (peripheral-pairing-peer p)))))
+        (ignore-errors
+         (smp-answer-ltk-request conn ltk
+                                 :session (and (smp-session-p session) session)
+                                 :ltk (and known (bond-ltk known)))))))
+  ;; Encryption Change: the only thing that may set the server encrypted.
+  (let ((enc (hci-take-event conn :event #x08)))
+    (when (and enc (>= (length enc) 7))
+      (let ((ok (and (zerop (aref enc 3)) (= 1 (aref enc 6)))))
+        (setf (gatt-server-encrypted server) ok)
+        (when ok
+          (let ((b (%pairing-collect-keys p conn)))
+            (when (peripheral-pairing-on-paired p)
+              (funcall (peripheral-pairing-on-paired p)
+                       conn (peripheral-pairing-session p) b)))))))
+  ;; A Pairing Request from the peer arrives on the SMP channel.
+  (when (and (smp-pairing-requested-p conn)
+             (not (smp-session-p (peripheral-pairing-session p))))
+    (handler-case
+        (setf (peripheral-pairing-session p)
+              (smp-pair conn :role :peripheral
+                             :local-addr (peripheral-pairing-local-addr p)
+                             :local-addr-type (peripheral-pairing-local-addr-type p)
+                             :peer-addr (peripheral-pairing-peer p)
+                             :peer-addr-type (peripheral-pairing-peer-type p)
+                             :io-capability (peripheral-pairing-io-capability p)
+                             :passkey (peripheral-pairing-passkey p)
+                             :timeout-ms 60000))
+      (smp-error (e)
+        (declare (ignorable e))
+        ;; Hold the link long enough for the Pairing Failed we just sent to
+        ;; leave the controller. Tearing down now discards it, and the peer
+        ;; reports a timeout instead of the reason it was given.
+        (dotimes (i 20) (hci-pump conn 100))))))
+
 (defun serve-peripheral (server sock &key on-connect on-tick on-disconnect
+                                          pairing
                                           (accept-timeout-ms 60000)
                                           seconds (tick-ms 50))
   "Advertise, accept a central, serve GATT to it, and go back to advertising
@@ -84,6 +204,11 @@ loses simply never sees them."
                                          accept-timeout-ms))
                 (when new
                   (setf conn new)
+                  ;; Before ON-CONNECT, so a hook that inspects the pairing
+                  ;; state sees this connection's, not the last one's.
+                  (when pairing
+                    (setf (gatt-server-encrypted server) nil)
+                    (%pairing-reset pairing peer ptype))
                   ;; The controller stopped advertising when it accepted; it
                   ;; stays stopped until we say otherwise.
                   (when on-connect (funcall on-connect conn peer ptype)))))
@@ -99,5 +224,10 @@ loses simply never sees them."
                           (progn
                             (when on-disconnect (funcall on-disconnect conn))
                             (setf conn nil))
-                          (when on-tick (funcall on-tick conn op)))))))))
+                          (progn
+                            ;; Before ON-TICK: a peripheral whose
+                            ;; characteristics require encryption wants the
+                            ;; link secured before it is asked to do work.
+                            (when pairing (%drive-pairing pairing server conn))
+                            (when on-tick (funcall on-tick conn op))))))))))
       (ignore-errors (set-adv-enable sock nil)))))

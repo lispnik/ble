@@ -260,6 +260,13 @@
           ;; Being a peripheral (src/peripheral.lisp)
           peripheral-accept
           serve-peripheral
+          make-peripheral-pairing
+          peripheral-pairing
+          peripheral-pairing-p
+          peripheral-pairing-session
+          peripheral-pairing-peer
+          peripheral-pairing-local-addr
+          peripheral-pairing-irk
           ;; Resource-safe wrappers (src/with.lisp)
           with-hci-socket
           with-hci-user-socket

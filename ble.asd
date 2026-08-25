@@ -52,9 +52,14 @@
                              (:file "smp-crypto" :depends-on ("ble-package"))
                              (:file "smp" :depends-on ("smp-crypto" "hci-conn"))
                              (:file "bonds" :depends-on ("smp"))
+                             ;; smp and bonds because SERVE-PERIPHERAL can
+                             ;; drive pairing; without them here ASDF is free
+                             ;; to compile this first and the SMP calls become
+                             ;; forward references.
                              (:file "peripheral" :depends-on ("gatt-server"
                                                               "hci-conn"
-                                                              "advertiser"))
+                                                              "advertiser"
+                                                              "smp" "bonds"))
                              (:file "nus"        :depends-on ("att" "hci-conn"))
                              (:file "teardown"   :depends-on ("hci-conn"))
                              ;; last: wraps acquire/release pairs from all of

@@ -363,6 +363,35 @@ show it, and one did.
 The published vectors are now in the suite. A constant that cannot be reasoned
 about has to be checked against a source, not recalled.
 
+## Pairing, from a peripheral
+
+`serve-peripheral` takes a `:pairing`, and drives the exchange itself:
+
+```lisp
+(let ((pairing (ble:make-peripheral-pairing
+                :local-addr addr        ; the address being advertised
+                :irk (ble:smp-random-octets sock 16)
+                :on-paired (lambda (conn session bond) ...))))
+  (ble:serve-peripheral server sock :pairing pairing ...))
+```
+
+`local-addr` is not optional: it is bound into the pairing crypto, so a
+peripheral that pairs as one address while advertising another produces
+confirm values the peer cannot verify.
+
+The sequencing it removes from consumers is short but exact, and each step
+fails as something else when it is wrong. The Long Term Key Request comes from
+the *controller*, not the peer, and must be answered from the session just
+negotiated or from a stored bond — unanswered, the link never encrypts and the
+central gives up silently. Keys are distributed *over* the encrypted link, so
+the identity exchange belongs after Encryption Change and not when `smp-pair`
+returns; collecting them earlier stores a bond against an address that expires
+within minutes.
+
+This was written out by hand in `examples/glucose/` and again in
+`tools/pair-with-phone/`, and the second copy had already drifted from the
+first.
+
 ## Bonds, and peers that change address
 
 `smp-pair` gives you keys; a bond is what makes them worth having. Without one

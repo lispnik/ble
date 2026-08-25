@@ -391,73 +391,6 @@ deciding whether to pair."
   "The ATT transaction timeout: a peer that has not confirmed in this long is
 not going to, and waiting forever is how a device hangs instead of recovering.")
 
-(defstruct link
-  "What the pairing hooks need to remember between ticks.
-
-A peripheral cannot start pairing. All it can do is require security on
-something the central already wants -- which, for this device, is every
-characteristic worth connecting for."
-  peer peer-type session asked local-addr irk)
-
-(defun drive-pairing (state meter conn)
-  "Pair when asked, and answer the controller's key request.
-
-This is the part a secure peripheral has to write for itself today: the
-library has every piece -- SMP-PAIR, SMP-ANSWER-LTK-REQUEST, the bond store
--- but SERVE-PERIPHERAL only serves GATT, so the sequencing is the
-peripheral's job."
-  (let ((server (meter-server meter)))
-    (unless (link-asked state)
-      (setf (link-asked state) t)
-      (ble:smp-request-security conn))
-    (let ((ltk (ble:hci-take-event conn :event #x3E :subevent #x05)))
-      (when ltk
-        (let* ((session (link-session state))
-               (known (and (not (ble:smp-session-p session))
-                           (link-peer state)
-                           (ble:find-bond (link-peer state)))))
-          (ble:smp-answer-ltk-request
-           conn ltk :session (and (ble:smp-session-p session) session)
-                    :ltk (and known (ble:bond-ltk known))))))
-    (let ((enc (ble:hci-take-event conn :event #x08)))
-      (when (and enc (>= (length enc) 7))
-        (let ((ok (and (zerop (aref enc 3)) (= 1 (aref enc 6)))))
-          (setf (ble:gatt-server-encrypted server) ok)
-          (format t "~&~:[encryption failed (status 0x~2,'0X)~;*** link ~
-                     encrypted -- stored records are now readable ***~]~%"
-                  ok (aref enc 3))
-          (force-output)
-          ;; Keys are distributed over the encrypted link, so the bond is
-          ;; collected here and not when pairing returned -- doing it there
-          ;; stores a bond against an address that expires within minutes.
-          (when (and ok (ble:smp-session-p (link-session state)))
-            (ignore-errors
-             (ble:smp-send-identity (link-session state)
-                                    :irk (link-irk state)
-                                    :identity-addr (link-local-addr state)
-                                    :identity-addr-type :random)
-             (ble:smp-receive-keys (link-session state) :timeout-ms 8000)
-             (ble:store-bond
-              (ble:bond-from-session (link-session state)
-                                     :identity-addr (link-peer state)
-                                     :identity-addr-type (link-peer-type state))))))))
-    (when (and (ble:smp-pairing-requested-p conn)
-               (not (ble:smp-session-p (link-session state))))
-      (handler-case
-          (setf (link-session state)
-                (ble:smp-pair conn :role :peripheral
-                                   :local-addr (link-local-addr state)
-                                   :local-addr-type :random
-                                   :peer-addr (link-peer state)
-                                   :peer-addr-type (link-peer-type state)
-                                   :timeout-ms 60000))
-        (ble:smp-error (e)
-          (format t "~&pairing failed: ~A~%" e) (force-output)
-          ;; Hold the link long enough for the Pairing Failed to leave the
-          ;; controller; tearing down now discards it and the peer reports a
-          ;; timeout instead of the reason we gave it.
-          (dotimes (i 20) (ble:hci-pump conn 100)))))))
-
 (defun run (&key (dev nil) (seconds nil) (readings '(96 142 88 175 104)))
   "Advertise as a glucose meter holding a few stored readings.
 
@@ -466,38 +399,49 @@ asking for records after a sequence number gets a meaningful subset rather
 than all or nothing."
   (let* ((meter (build-server))
          (dev (or dev (ble:default-hci-dev)))
-         (state (make-link)))
+         (pairing nil))
     (loop for mg/dl in readings
           for i from (length readings) downto 1
           do (add-record meter mg/dl
                          :time (- (get-universal-time) (* i 3600))))
     (ble:install-adapter-teardown)
     (ble:with-hci-user-socket (sock dev)
-      (setf (link-local-addr state) (ble:static-random-address
-                                     (ble:smp-random-octets sock 6))
-            (link-irk state) (ble:smp-random-octets sock 16))
-      (ble:set-random-address sock (link-local-addr state))
+      ;; The library drives pairing now. This used to be forty-five lines
+      ;; here -- request security, answer the controller's key request,
+      ;; distribute identity after Encryption Change, store the bond -- and a
+      ;; second copy of it lived in tools/pair-with-phone/, already drifting.
+      ;; LOCAL-ADDR is not optional: it is bound into the pairing crypto, so
+      ;; it has to be the address actually being advertised.
+      (setf pairing (ble:make-peripheral-pairing
+                     :local-addr (ble:static-random-address
+                                  (ble:smp-random-octets sock 6))
+                     :irk (ble:smp-random-octets sock 16)
+                     :on-paired
+                     (lambda (conn session bond)
+                       (declare (ignore conn session))
+                       (format t "~&*** link encrypted -- stored records are ~
+                                  now readable~:[~;, and a bond was stored~]~%"
+                               bond)
+                       (force-output))))
+      (ble:set-random-address sock (ble:peripheral-pairing-local-addr pairing))
       (ble:set-adv-parameters sock :adv-type ble:+adv-ind+ :own-addr-type 1)
       (ble:set-adv-data sock (ble:adv-data
                               :flags '(:general-discoverable :no-bredr)
                               :name *name*
                               :services-16 (list ble:+service-glucose+)))
       (format t "~&~A advertising on hci~D as ~A, holding ~D record(s)~%"
-              *name* dev (ble:format-mac (link-local-addr state))
+              *name* dev (ble:format-mac
+                          (ble:peripheral-pairing-local-addr pairing))
               (length (meter-records meter)))
       (force-output)
       (ble:serve-peripheral
        (meter-server meter) sock
        :seconds seconds
+       :pairing pairing
        :on-connect (lambda (conn peer ptype)
                      (declare (ignore conn))
-                     (setf (link-peer state) peer
-                           (link-peer-type state) ptype
-                           (link-session state) nil
-                           (link-asked state) nil
-                           (meter-procedure meter) nil
-                           (meter-outstanding meter) nil
-                           (ble:gatt-server-encrypted (meter-server meter)) nil)
+                     (setf (meter-procedure meter) nil
+                           (meter-outstanding meter) nil)
                      (format t "~&connected: ~A (~(~A~))~:[~; -- a peer we ~
                                 have a bond with~]~%"
                              (ble:format-mac peer) ptype (ble:find-bond peer))
@@ -524,5 +468,4 @@ than all or nothing."
                    +indication-timeout-seconds+)
            (force-output)
            (setf (meter-outstanding meter) nil))
-         (drive-pairing state meter conn)
          (run-procedure meter conn))))))
