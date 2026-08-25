@@ -306,13 +306,28 @@ Verified against a phone: it pairs once, and on later connections arrives at
 an address never seen before, is resolved to its identity through the IRK it
 distributed, and encrypts from the stored key with no pairing prompt.
 
-**A note on randomness.** `smp-random` XORs the controller's `LE Rand` with
-`/dev/urandom`. The RTL8761B dongles here answer LE Rand with the same values
-after a reset — the peripheral drew the same "random" address on five
-consecutive runs — and the same part returns a fixed P-256 public key across
-separate processes. XOR is the right combiner: the result is as unpredictable
-as the better of the two sources, so this is no worse than either alone, where
-choosing one would have been a bet.
+**A note on randomness, which turned out to matter.** `smp-random` XORs the
+controller's `LE Rand` with `/dev/urandom`, because the controller's output is
+measurably not random across a reset.
+
+Measured, not assumed: on these RTL8761B dongles, **39 of 100** 32-bit words
+drawn after one controller takeover reappeared after the next. Chance would
+give 0.000002. Within a single takeover every value is distinct, so nothing
+looks wrong until the process restarts and draws again — which is exactly how
+it surfaced, as a peripheral advertising the same "random" address five runs
+running. The same part also returns a fixed P-256 public key across separate
+processes, and answers `LE Generate DHKey` with a value that is visibly not a
+shared secret.
+
+`tools/rng-check/` measures it, so anyone can find out what their own part does
+rather than inherit the assumption. Any shared word at all is a finding. It
+does not follow that keys derived from it are recoverable — that would take
+real analysis — but it does mean the generator is not doing what its
+specification claims, and key material must not rest on it alone.
+
+XOR is the right combiner: the result is as unpredictable as the better of the
+two sources, so this is no worse than either alone, where choosing one would
+have been a bet.
 
 ## Streams: connection-oriented channels
 

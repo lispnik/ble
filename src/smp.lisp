@@ -164,10 +164,13 @@ byte-order mistake from a wiring one.")
 (defun smp-random-octets (sock n)
   "N random octets, from the controller and the kernel XORed together.
 
-Two sources because one of them is not trustworthy. The RTL8761B dongles here
-answer LE Rand with the same values after a reset -- the peripheral drew the
-same `random\' address on four consecutive runs -- and the same controller
-returns a fixed P-256 public key across separate processes. A controller with
+Two sources because one of them is not trustworthy, and measurably so. On the
+RTL8761B dongles used here, 39 of 100 32-bit words drawn from LE Rand were
+shared between two consecutive controller takeovers, where chance would give
+0.000002 -- see tools/rng-check/. Within a single takeover the values are
+distinct, so nothing looks wrong until the process restarts and draws again:
+the peripheral drew the same `random' address on five consecutive runs. The
+same part returns a fixed P-256 public key across separate processes. A controller with
 a deterministic RNG at a fixed point in startup is not a thing to derive a
 long-term identity key from.
 
