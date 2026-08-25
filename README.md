@@ -746,7 +746,7 @@ left once the sender is made to wait:
 |---|---|---|
 | NUS, central → peripheral (Write Command) | 34.9 kbit/s | **204.8 kbit/s** |
 | NUS, peripheral → central (notifications) | 26.4 kbit/s | **154.5 kbit/s** |
-| L2CAP CoC, 32 KB object (`examples/object-transfer/`) | 25.2 kbit/s | — |
+| L2CAP CoC, 32 KB object (`examples/object-transfer/`) | 25.2 kbit/s | **75.6 kbit/s** (at 15 ms) |
 
 Zero backpressure stalls throughout, and in every case the two ends'
 independent byte counts agree.
@@ -762,10 +762,27 @@ What is left is worth knowing for what it is not. The connection-oriented
 channel is *not* faster than notifications (25 against 26 kbit/s at the same
 interval): a 512-octet SDU is six L2CAP frames and about twenty ACL packets
 before it reaches the air, so CoC buys arbitrary-length SDUs and its own flow
-control, not speed. Beyond the interval, the remaining levers are the 2M PHY
-(`LE Set PHY` on a live connection, not implemented) and Data Length Extension
-(`LE Set Data Length`, not implemented) — the latter uncertain here, since
-these dongles report the specification-minimum 27-octet LE ACL buffer.
+control, not speed. Beyond the interval there is less left than it looks. The **2M PHY** is now
+implemented (`hci-set-phy`, on a live connection rather than the preference
+`hci-set-default-phy` states) and makes no measurable difference here — 204.1
+against 203.8 kbit/s — because air time is not the constraint. The controller
+has eight ACL buffers of 27 octets and returns credits once per connection
+event, which puts the ceiling at
+
+    133 events/s × 8 packets × 27 octets ≈ 230 kbit/s of L2CAP payload
+
+and the measured 204 is 95% of that after fragmentation overhead. Halving the
+time a packet spends in the air does nothing when only eight may be in flight
+per event and the interval is already at the specification minimum.
+
+That leaves **Data Length Extension** (`LE Set Data Length`, not implemented)
+as the only remaining lever, and its value here is genuinely uncertain: these
+dongles report the specification-minimum 27-octet LE ACL buffer, so the host
+cannot hand over more per buffer whatever the air PDU becomes.
+
+The bulk-transfer example clients ask for a shorter interval; the sensor
+examples deliberately do not, because a battery peripheral notifying once a
+second wants the opposite trade.
 
 ## Commands the controller refused
 

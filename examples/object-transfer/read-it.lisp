@@ -52,6 +52,28 @@
         (olcp-result-name (aref r 2))
         :no-reply)))
 
+(defun tighten-link (chan ms why)
+  "Ask for a shorter connection interval before moving a lot of data.
+
+Credits come back once per connection event, so the event rate is the packet
+rate: a link left at whatever the peer's controller chose -- often 45 ms or
+more -- moves data about six times slower than one at 7.5 ms. The library has
+always had this call and nothing used it, so every example here shipped the
+default until it was measured.
+
+Not something to do reflexively. A short interval costs power at both ends,
+and a battery sensor sending one notification a second wants the opposite --
+which is why the sensor examples in this repository deliberately do not call
+this."
+  (multiple-value-bind (interval) (ble:hci-connection-update
+                                   chan :min-interval-ms ms
+                                        :max-interval-ms (* 2 ms))
+    (if (numberp interval)
+        (format t "~&connection interval now ~,2F ms (~A)~%" interval why)
+        (format t "~&connection interval unchanged (~A)~%" interval))
+    (force-output)
+    interval))
+
 (defun run (mac &key (dev 2) (addr-type :random) (want "bulk.dat"))
   "Walk the object list, then download WANT (a name) or the first readable one.
 
@@ -118,6 +140,7 @@ is a measurement of the control point round trip rather than of the channel."
             (dotimes (i index) (navigate chan olcp +olcp-next+))
             (format t "~&downloading ~A (~D octets)~%" (f-name target) (f-size target))
             (force-output)
+            (tighten-link chan 7.5 "about to move an object")
             ;; The channel, before the request. A server asked to read with
             ;; no channel open answers Channel Unavailable.
             (let ((coc (ble:l2cap-coc-connect chan object-transfer:+ots-psm+)))

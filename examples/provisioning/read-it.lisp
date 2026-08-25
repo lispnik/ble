@@ -78,6 +78,28 @@ half a configuration, and would look perfectly healthy while doing so."
       (force-output)
       (equalp before after))))
 
+(defun tighten-link (chan ms why)
+  "Ask for a shorter connection interval before moving a lot of data.
+
+Credits come back once per connection event, so the event rate is the packet
+rate: a link left at whatever the peer's controller chose -- often 45 ms or
+more -- moves data about six times slower than one at 7.5 ms. The library has
+always had this call and nothing used it, so every example here shipped the
+default until it was measured.
+
+Not something to do reflexively. A short interval costs power at both ends,
+and a battery sensor sending one notification a second wants the opposite --
+which is why the sensor examples in this repository deliberately do not call
+this."
+  (multiple-value-bind (interval) (ble:hci-connection-update
+                                   chan :min-interval-ms ms
+                                        :max-interval-ms (* 2 ms))
+    (if (numberp interval)
+        (format t "~&connection interval now ~,2F ms (~A)~%" interval why)
+        (format t "~&connection interval unchanged (~A)~%" interval))
+    (force-output)
+    interval))
+
 (defun run (mac &key (dev 2) (addr-type :random)
                      (ssid "Kitchen Wi-Fi 2.4GHz")
                      (psk "correct horse battery staple")
@@ -94,6 +116,8 @@ half a configuration, and would look perfectly healthy while doing so."
     (let ((h (handles chan)))
       (format t "~&status: ~A~%" (read-status chan h))
       (force-output)
+      ;; A queued write is many fragments, each costing a connection event.
+      (tighten-link chan 15 "about to write a configuration")
       ;; First, the abandoned write.
       (abandon chan h)
       ;; Then the real one.

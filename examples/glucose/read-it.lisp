@@ -70,6 +70,28 @@
     (setf (aref v 0) op (aref v 1) operator)
     v))
 
+(defun tighten-link (chan ms why)
+  "Ask for a shorter connection interval before moving a lot of data.
+
+Credits come back once per connection event, so the event rate is the packet
+rate: a link left at whatever the peer's controller chose -- often 45 ms or
+more -- moves data about six times slower than one at 7.5 ms. The library has
+always had this call and nothing used it, so every example here shipped the
+default until it was measured.
+
+Not something to do reflexively. A short interval costs power at both ends,
+and a battery sensor sending one notification a second wants the opposite --
+which is why the sensor examples in this repository deliberately do not call
+this."
+  (multiple-value-bind (interval) (ble:hci-connection-update
+                                   chan :min-interval-ms ms
+                                        :max-interval-ms (* 2 ms))
+    (if (numberp interval)
+        (format t "~&connection interval now ~,2F ms (~A)~%" interval why)
+        (format t "~&connection interval unchanged (~A)~%" interval))
+    (force-output)
+    interval))
+
 (defun run (mac &key (dev 2) (addr-type :random) (timeout-ms 15000))
   (ble:install-adapter-teardown)
   (ble:with-att-channel
@@ -129,6 +151,8 @@
                       (+ (aref r 2) (ash (aref r 3) 8)))
               (format t "~&unexpected reply to the count: ~A~%" r)))
         (force-output)
+        ;; Records stream back as notifications, so this is worth doing first.
+        (tighten-link chan 15 "about to download stored records")
         ;; Now the records themselves.
         (ble:att-write-value chan (ble:gatt-char-handle racp)
                              (racp-write +op-report-records+ +operator-all+))
