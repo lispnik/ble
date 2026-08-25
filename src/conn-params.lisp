@@ -175,21 +175,32 @@ identifier."
 
 A connection RSSI, not an advertising one: it is measured on packets from a
 peer that is already connected, so it reflects the link actually in use rather
-than whatever an advertisement happened to arrive at."
+than whatever an advertisement happened to arrive at.
+
+Returns the dBm value, :TIMEOUT, or the controller's status octet if it
+refused.
+
+The answer comes from SEND-HCI-COMMAND rather than from the connection's event
+queue. This used to drop every queued Command Complete first and then wait for
+a fresh one, which worked but was a guess dressed as a precaution: any other
+command answered in the same window was indistinguishable from this one's. Now
+the match is by opcode, and anything else read on the way is put back for
+HCI-PUMP rather than dropped."
   (let ((sock (%conn-sock conn))
         (h (%conn-handle conn handle))
         (params (make-octets 2)))
     (u16le-put params 0 h)
-    ;; Anything of this type still queued belongs to an earlier
-    ;; exchange and would be claimed as this command's answer.
-    (hci-drop-events conn :event +hci-command-complete-evt+)
-    (send-hci-command sock +ogf-status-params+ +ocf-read-rssi+ params)
-    (let ((evt (%await-hci-event conn :event +hci-command-complete-evt+
-                                      :timeout-ms timeout-ms)))
+    (let ((answer (handler-case
+                      (send-hci-command sock +ogf-status-params+ +ocf-read-rssi+
+                                        params :timeout-ms timeout-ms
+                                               :name "Read RSSI")
+                    ;; A refusal is this function's answer, not its caller's
+                    ;; problem: the documented return already includes a status.
+                    (hci-command-error (e) (hci-command-error-status e)))))
       (cond
-        ((null evt) :timeout)
-        ((eq evt :disconnected) :disconnected)
-        ((< (length evt) 10) :timeout)
-        ((/= (aref evt 6) 0) (aref evt 6))       ; status
-        ;; The RSSI octet is signed -- see S8.
-        (t (s8 evt 9))))))
+        ((integerp answer) answer)              ; refused, with its status
+        ((null answer) :timeout)
+        (t (let ((rp (command-return-params answer)))
+             ;; Return parameters are the handle (2 octets) then the RSSI,
+             ;; which is signed.
+             (if (and rp (>= (length rp) 3)) (s8 rp 2) :timeout)))))))

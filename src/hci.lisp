@@ -42,6 +42,26 @@
 (defconstant +ocf-read-bd-addr+   #x0009)
 (defconstant +ocf-le-set-default-phy+ #x0031)
 (defconstant +hci-cmd-complete-evt+ #x0E)
+;; Here rather than beside its friends in hci-conn.lisp because SEND-HCI-COMMAND
+;; needs it and that file loads later -- a forward reference compiles to an
+;; undefined variable and a warning nobody reads.
+(defconstant +hci-cmd-status-evt+   #x0F)
+
+(define-condition hci-command-error (ble-error)
+  ((opcode :initarg :opcode :reader hci-command-error-opcode)
+   (status :initarg :status :reader hci-command-error-status)
+   (name   :initarg :name   :initform nil :reader hci-command-error-name))
+  (:report (lambda (c s)
+             (format s "HCI command ~@[~A ~]0x~4,'0X refused by the controller ~
+                        (status 0x~2,'0X)"
+                     (hci-command-error-name c)
+                     (hci-command-error-opcode c)
+                     (hci-command-error-status c))))
+  (:documentation
+   "The controller refused a command. Raised by SEND-HCI-COMMAND rather than
+returned, because every caller of it was written on the assumption that
+sending is the same as doing, and a return value they do not look at would
+preserve exactly the silence this condition exists to break."))
 
 (defun hci-opcode (ogf ocf)
   (logior ocf (ash ogf 10)))
@@ -55,8 +75,16 @@ controller's ACL data length once known.
 ACL-LEN is kept here rather than only returned from OPEN-HCI-USER-SOCKET
 because it is a property of the controller, and anything that wraps the
 constructor -- WITH-HCI-USER-SOCKET, for one -- would otherwise drop it and
-leave the caller unable to fragment correctly."
-  fd dev acl-len)
+leave the caller unable to fragment correctly.
+
+PENDING holds packets that a checked SEND-HCI-COMMAND read while looking for
+its own Command Complete. They are not ours to discard -- on a live
+connection they are ACL data and events that HCI-PUMP is waiting for -- so
+they are put back here and READ-HCI-PACKET hands them out before reading the
+socket again. Without it, checking a command status would quietly eat another
+reader's packets, which is a bug this library has already had six times in
+other guises."
+  fd dev acl-len (pending nil))
 
 (defun %hci-filter-bytes ()
   "The 16-octet struct hci_filter that lets every event packet through.
@@ -108,8 +136,61 @@ OPEN-HCI-USER-SOCKET in hci-conn.lisp)."
     (%close (hci-socket-fd sock))
     (setf (hci-socket-fd sock) nil)))
 
-(defun send-hci-command (sock ogf ocf params)
-  "Build and write a single HCI command packet to the controller."
+(defparameter *hci-command-timeout-ms* 1000
+  "How long a checked SEND-HCI-COMMAND waits for the controller to answer.")
+
+(defun %command-answer-p (pkt opcode)
+  "Is PKT this command's Command Complete or Command Status?
+
+The two have different shapes and both must be recognised. A Command Complete
+carries the opcode at offsets 4-5 and the status at 6; a Command Status
+carries the status at 3 and the opcode at 5-6. Commands that take time --
+creating a connection, disconnecting, reading a remote feature -- answer with
+Status and deliver their result later as an event, so a checker that knew only
+about Complete would wait out its timeout on exactly the commands most worth
+checking."
+  (and (>= (length pkt) 7)
+       (= (aref pkt 0) +hci-event-pkt+)
+       (or (and (= (aref pkt 1) +hci-cmd-complete-evt+) (= (u16-le pkt 4) opcode))
+           (and (= (aref pkt 1) +hci-cmd-status-evt+) (= (u16-le pkt 5) opcode)))))
+
+(defun command-answer-status (pkt)
+  "The status octet of a Command Complete or Command Status packet."
+  (if (= (aref pkt 1) +hci-cmd-status-evt+) (aref pkt 3) (aref pkt 6)))
+
+(defun command-return-params (pkt)
+  "The return parameters of a Command Complete, after the status octet.
+NIL for a Command Status, which has none."
+  (when (and (= (aref pkt 1) +hci-cmd-complete-evt+) (> (length pkt) 7))
+    (subseq pkt 7)))
+
+(defun send-hci-command (sock ogf ocf params
+                         &key (check t) (timeout-ms *hci-command-timeout-ms*)
+                              name)
+  "Build and write a single HCI command packet, and by default check that the
+controller accepted it.
+
+Returns the Command Complete or Command Status packet, or NIL if none arrived
+within TIMEOUT-MS. Signals HCI-COMMAND-ERROR when the controller answers with
+a non-zero status.
+
+CHECK defaults to true because the alternative is what this library did for a
+long time: write the command and walk away. A controller that refuses one --
+because a parameter is out of range, or the command is not supported, or the
+adapter is in the wrong state -- says so, and nobody was listening. The
+symptom is a device that configures itself successfully and then does nothing,
+with no error anywhere to suggest why.
+
+Worth being exact about what this does and does not buy. It catches a
+controller saying no. It cannot catch a controller saying yes to something
+that was not what you meant: an advertising set was once configured, enabled
+and invisible for an hour of debugging here, and every one of its commands had
+returned success -- the fault was in how they were sequenced, not in any of
+them. What the checking would have saved there was the throwaway diagnostic
+written to rule this out, which is worth something, but not the diagnosis.
+
+Pass :CHECK NIL where a caller wants to read the answer itself, or where
+there is no answer to read."
   (let* ((opcode (hci-opcode ogf ocf))
          (params (coerce-octets params))
          (plen (length params))
@@ -120,7 +201,27 @@ OPEN-HCI-USER-SOCKET in hci-conn.lisp)."
     (replace pkt params :start1 4)
     (cffi:with-foreign-object (buf :unsigned-char (length pkt))
       (bytes-to-foreign pkt buf)
-      (check-syscall (%write (hci-socket-fd sock) buf (length pkt)) "write"))))
+      (check-syscall (%write (hci-socket-fd sock) buf (length pkt)) "write"))
+    (when check
+      (let ((deadline (+ (get-internal-real-time)
+                         (round (* timeout-ms internal-time-units-per-second)
+                                1000))))
+        (loop
+          (let ((remaining (round (* 1000 (- deadline (get-internal-real-time)))
+                                  internal-time-units-per-second)))
+            (when (<= remaining 0) (return nil))
+            (let ((answer (read-hci-packet sock :timeout-ms (min 200 remaining))))
+              (cond
+                ((null answer))            ; nothing yet; the deadline decides
+                ((%command-answer-p answer opcode)
+                 (let ((status (command-answer-status answer)))
+                   (unless (zerop status)
+                     (error 'hci-command-error :opcode opcode :status status
+                                               :name name))
+                   (return answer)))
+                ;; Not ours. Put it back for whoever it belongs to.
+                (t (setf (hci-socket-pending sock)
+                         (nconc (hci-socket-pending sock) (list answer))))))))))))
 
 (defparameter *hci-read-buffer-size* 2048)
 
@@ -131,6 +232,10 @@ With TIMEOUT-MS the read is bounded by a poll first, which is what lets a
 caller stop scanning on a deadline instead of blocking until the next packet
 happens to arrive. Without it the read blocks, which is the historic
 behaviour and still what an endless scan loop wants."
+  ;; Anything a checked command read and put back comes out first, in order,
+  ;; and without consulting the timeout: it has already arrived.
+  (when (hci-socket-pending sock)
+    (return-from read-hci-packet (pop (hci-socket-pending sock))))
   (when (and timeout-ms (not (fd-readable-p (hci-socket-fd sock) timeout-ms)))
     (return-from read-hci-packet nil))
   (cffi:with-foreign-object (buf :unsigned-char *hci-read-buffer-size*)
@@ -141,39 +246,22 @@ behaviour and still what an endless scan loop wants."
             (t (foreign-to-bytes buf n))))))
 
 (defun hci-read-bd-addr (&key (dev 0) sock)
-  "Read the local BD_ADDR via the HCI Read_BD_ADDR command. Returns a 6-byte
-octet vector in on-air byte order (LSB first) -- exactly the form needed to
-bind an L2CAP source address to this adapter.
-
-SOCK uses a socket the caller already holds instead of opening one on
-hci<DEV>. That is not merely an optimisation: once an adapter has been taken
-with HCI_CHANNEL_USER the kernel has no access to it, so the DEV path cannot
-reach it at all, and a peripheral needs its own address to pair -- f5 and f6
-bind the keys to both addresses."
+  "The controller's own BD_ADDR, on-air byte order."
   (let* ((own-socket (null sock))
-         (sock (or sock (open-hci-socket :dev dev)))
-         (opcode (hci-opcode +ogf-info-params+ +ocf-read-bd-addr+)))
+         (sock (or sock (open-hci-socket :dev dev))))
     (unwind-protect
-         (progn
-           (send-hci-command sock +ogf-info-params+ +ocf-read-bd-addr+ #())
-           ;; Bounded: LIST-HCI-ADAPTERS calls this for every adapter under
-           ;; IGNORE-ERRORS, and IGNORE-ERRORS cannot rescue a blocked read.
-           ;; A controller that never answers should cost a second, not the
-           ;; process.
-           (loop repeat 20
-                 for pkt = (read-hci-packet sock :timeout-ms 100)
-                 ;; Command Complete: type(0x04) evt(0x0E) plen ncmd opcode(2)
-                 ;; status(1) bd_addr(6)  -> bd_addr at offset 7..12
-                 do (when (and pkt (>= (length pkt) 13)
-                               (= (aref pkt 0) +hci-event-pkt+)
-                               (= (aref pkt 1) +hci-cmd-complete-evt+)
-                               (= (u16-le pkt 4) opcode))
-                      (let ((status (aref pkt 6)))
-                        (unless (zerop status)
-                          (error "Read_BD_ADDR on hci~D failed (status 0x~2,'0X)"
-                                 dev status))
-                        (return (subseq pkt 7 13))))
-                 finally (error "no response to Read_BD_ADDR on hci~D" dev)))
+         ;; The address is this command's return parameters, and
+         ;; SEND-HCI-COMMAND already waited for them and checked the status --
+         ;; so there is no second read here and no second status check.
+         (let ((params (command-return-params
+                        (or (send-hci-command sock +ogf-info-params+
+                                              +ocf-read-bd-addr+ #()
+                                              :name "Read_BD_ADDR"
+                                              :timeout-ms 2000)
+                            (error "no response to Read_BD_ADDR on hci~D" dev)))))
+           (unless (and params (>= (length params) 6))
+             (error "Read_BD_ADDR on hci~D returned no address" dev))
+           (subseq params 0 6))
       ;; Only close what we opened; a caller's socket is not ours to shut.
       (when own-socket (close-hci-socket sock)))))
 
@@ -183,27 +271,18 @@ bind the keys to both addresses."
 is 0 (we name both TX and RX explicitly). Returns T on success.
 
 This sets the controller's default PHY preference for the PHY Update
-procedure on connections. Whether it also influences the *initiating* PHY
-for connection establishment is controller/kernel dependent -- which is
-exactly what the nus-stream --set-default-phy experiment probes."
-  (let ((sock (open-hci-socket :dev dev))
-        (opcode (hci-opcode +ogf-le+ +ocf-le-set-default-phy+)))
+procedure. It says nothing about which PHY a connection is initiated on --
+that is chosen per connection by LE Extended Create Connection.
+
+A controller that does not support the Coded PHY refuses this outright, and
+SEND-HCI-COMMAND turns that refusal into a condition rather than letting the
+caller believe it now prefers a PHY it cannot use."
+  (let ((sock (open-hci-socket :dev dev)))
     (unwind-protect
-         (progn
-           (send-hci-command sock +ogf-le+ +ocf-le-set-default-phy+
-                             (vector 0 tx-phys rx-phys))
-           (loop
-             (let ((pkt (read-hci-packet sock)))
-               (unless pkt (error "no response to LE Set Default PHY on hci~D" dev))
-               (when (and (>= (length pkt) 7)
-                          (= (aref pkt 0) +hci-event-pkt+)
-                          (= (aref pkt 1) +hci-cmd-complete-evt+)
-                          (= (u16-le pkt 4) opcode))
-                 (let ((status (aref pkt 6)))
-                   (unless (zerop status)
-                     (error "LE Set Default PHY on hci~D failed (status 0x~2,'0X)"
-                            dev status))
-                   (return t))))))
+         (progn (send-hci-command sock +ogf-le+ +ocf-le-set-default-phy+
+                                  (vector 0 tx-phys rx-phys)
+                                  :name "LE Set Default PHY" :timeout-ms 2000)
+                t)
       (close-hci-socket sock))))
 
 ;;; Adapter enumeration ---------------------------------------------------

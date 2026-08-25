@@ -42,7 +42,6 @@
 (defconstant +ocf-disconnect+          #x0006)
 (defconstant +ogf-link-ctl+            #x01)
 
-(defconstant +hci-cmd-status-evt+      #x0F)
 (defconstant +hci-disconn-complete-evt+ #x05)
 (defconstant +hci-num-completed-evt+   #x13)
 (defconstant +sub-le-conn-complete+     #x01)
@@ -131,21 +130,17 @@ second one used to just close the socket and leave the radio down."
     (hci-device-up (hci-socket-dev sock))))
 
 (defun hci-do-command (sock ogf ocf params &key (timeout-ms 3000) name)
-  "Send an HCI command and wait for its Command Complete. Returns the
-event parameters after the status byte. Errors on bad status / timeout."
-  (let ((opcode (hci-opcode ogf ocf)))
-    (send-hci-command sock ogf ocf params)
-    (loop
-      (let ((pkt (hci-poll-read sock timeout-ms)))
-        (unless pkt (error "HCI ~A: no Command Complete" (or name opcode)))
-        (when (and (>= (length pkt) 7)
-                   (= (aref pkt 0) +hci-event-pkt+)
-                   (= (aref pkt 1) +hci-cmd-complete-evt+)
-                   (= (u16-le pkt 4) opcode))
-          (let ((status (aref pkt 6)))
-            (unless (zerop status)
-              (error "HCI ~A failed (status 0x~2,'0X)" (or name opcode) status))
-            (return (subseq pkt 7))))))))
+  "Send an HCI command and return its return parameters, after the status.
+
+A thin wrapper now: SEND-HCI-COMMAND waits for the answer and signals on a
+bad status, which is what this function used to be for. It stays because
+`return the parameters, and I know there are some\' is a different intent from
+`send this\', and because it names the command in the error."
+  (let ((answer (send-hci-command sock ogf ocf params
+                                  :timeout-ms timeout-ms :name name)))
+    (unless answer
+      (error "HCI ~A: no Command Complete" (or name (hci-opcode ogf ocf))))
+    (or (command-return-params answer) #())))
 
 (defun hci-init-controller (sock)
   "Minimal post-takeover init: reset, enable all (incl. LE meta) events,
@@ -216,7 +211,10 @@ status, advertising reports) are consumed."
   "Cancel an in-flight create-connection and drain events so a fresh one
 can be issued (re-issuing while a create is pending is Command Disallowed)."
   (ignore-errors
-    (send-hci-command sock +ogf-le+ +ocf-le-create-conn-cancel+ #())
+    ;; :CHECK NIL. Cancelling when nothing is in flight is Command Disallowed,
+    ;; which is a normal answer here rather than a fault -- and a signal would
+    ;; skip the drain below, which is what this function is actually for.
+    (send-hci-command sock +ogf-le+ +ocf-le-create-conn-cancel+ #() :check nil)
     ;; Read until the cancellation's Connection Complete (status 0x02).
     (loop repeat 40
           for pkt = (hci-poll-read sock 800)
@@ -291,7 +289,12 @@ attempt between tries."
                      (%legacy-create-conn-params peer-mac peer-type)))
          (opcode (hci-opcode +ogf-le+ ocf)))
     (dotimes (attempt (1+ retries))
-      (send-hci-command sock +ogf-le+ ocf params)
+      ;; :CHECK NIL, alone among the command sites here, because
+      ;; %AWAIT-LE-CONNECTION already reads this command's Command Status and
+      ;; turns a refusal into :FAILED -- which this loop retries. Letting
+      ;; SEND-HCI-COMMAND consume it instead would signal out of a path whose
+      ;; whole purpose is to try again.
+      (send-hci-command sock +ogf-le+ ocf params :check nil)
       (let ((outcome (%await-le-connection sock opcode timeout-ms)))
         (when (integerp outcome)
           (return-from hci-le-create-connection outcome))
@@ -309,7 +312,13 @@ attempt between tries."
    (let ((p (make-octets 3)))
      (u16le-put p 0 handle)
      (setf (aref p 2) reason)
-     (send-hci-command sock +ogf-link-ctl+ +ocf-disconnect+ p))))
+     ;; Best effort, as the docstring says: this is called from teardown
+     ;; paths where the peer may already be gone, and Command Disallowed is
+     ;; then the expected answer rather than a problem to raise. The
+     ;; IGNORE-ERRORS around it would swallow the condition anyway; saying so
+     ;; here is cheaper than leaving the next reader to work out why.
+     (send-hci-command sock +ogf-link-ctl+ +ocf-disconnect+ p
+                       :name "Disconnect"))))
 
 ;;; --- ACL / L2CAP transport (ATT lives on CID 0x0004) -------------------
 

@@ -691,6 +691,27 @@ tests through it immediately found a walk that never terminated when a peer
 repeated itself, and an indication path that had been reported as implemented
 while half of the edit had silently failed to apply.
 
+## Commands the controller refused
+
+`send-hci-command` waits for the Command Complete or Command Status and
+signals `hci-command-error` on a non-zero status. It did not always: for a
+long time it wrote the command and walked away, so a controller refusing one —
+an out-of-range parameter, an unsupported command, an adapter in the wrong
+state — was completely silent, and the symptom was a device that configured
+itself successfully and then did nothing.
+
+Two call sites pass `:check nil` deliberately, both because something else was
+already reading that answer: the create-connection retry loop, whose
+`%await-le-connection` turns a refusal into `:failed` and tries again, and the
+connection-cancel path, where Command Disallowed is the expected reply and a
+signal would skip the event drain that is the point of the call.
+
+Checking has to read the socket, and on a live connection `hci-pump` is the
+only reader — so anything read while looking for the answer is put back on the
+socket's pending queue rather than dropped, and `read-hci-packet` hands those
+out first. Discarding them instead would be the same two-readers bug this
+library has had in several other guises.
+
 ## A trap worth knowing
 
 If your package `:use`s `#:ble`, a `defun` of a name `#:ble` already exports

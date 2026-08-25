@@ -43,6 +43,13 @@
           hci-socket-dev
           hci-socket-acl-len
           send-hci-command
+          *hci-command-timeout-ms*
+          hci-command-error
+          hci-command-error-opcode
+          hci-command-error-status
+          hci-command-error-name
+          command-answer-status
+          command-return-params
           read-hci-packet
           hci-read-bd-addr
           hci-set-default-phy
