@@ -101,6 +101,9 @@
                               :components ((:file "broadcaster")))
                              (:module "provisioning"
                               :components ((:file "provisioning")
+                                           (:file "read-it")))
+                             (:module "lisp-repl"
+                              :components ((:file "lisp-repl")
                                            (:file "read-it")))))))
 
 (asdf:defsystem #:ble/io-tests

@@ -48,7 +48,7 @@ Over the HCI-CHANNEL-USER transport, because that is the one that can choose
 its initiating PHY. WITH-NUS is the same thing over a kernel L2CAP socket
 where that does not matter."
   (ble:install-adapter-teardown)
-  (ble:with-nus-hci (nus mac :dev dev :addr-type addr-type :timeout 25)
+  (ble:with-nus-hci (nus (ble:parse-mac mac) :dev dev :addr-type addr-type :timeout 25)
     (unless nus (error "could not open a NUS connection to ~A" mac))
     (format t "~&connected to ~A, MTU ~D~%" mac (ble:nus-mtu nus))
     (format t "~&rx handle ~D, tx handle ~D, cccd ~D~%"

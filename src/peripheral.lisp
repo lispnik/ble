@@ -226,13 +226,22 @@ separately as well makes two readers race for the same packets, and whichever
 loses simply never sees them."
   (let ((deadline (and seconds (+ (get-internal-real-time)
                                   (* seconds internal-time-units-per-second))))
-        (conn nil))
+        (conn nil)
+        ;; Whether the controller is currently advertising. Tracked rather
+        ;; than re-asserted every pass: LE Set Advertising Enable is Command
+        ;; Disallowed when advertising is already on, and SEND-HCI-COMMAND
+        ;; now reports a refused command instead of discarding it -- so the
+        ;; old habit of enabling on every iteration became fatal the moment
+        ;; the accept timed out once and went round again.
+        (advertising nil))
     (unwind-protect
          (loop
            (when (and deadline (> (get-internal-real-time) deadline)) (return))
            (cond
              ((null conn)
-              (set-adv-enable sock t)
+              (unless advertising
+                (set-adv-enable sock t)
+                (setf advertising t))
               (multiple-value-bind (new peer ptype)
                   (peripheral-accept sock :timeout-ms
                                      (if deadline
@@ -241,7 +250,8 @@ loses simply never sees them."
                                                             internal-time-units-per-second)))
                                          accept-timeout-ms))
                 (when new
-                  (setf conn new)
+                  ;; The controller stops advertising the moment it accepts.
+                  (setf conn new advertising nil)
                   ;; Before ON-CONNECT, so a hook that inspects the pairing
                   ;; state sees this connection's, not the last one's.
                   (when pairing

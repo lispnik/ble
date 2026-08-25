@@ -196,6 +196,7 @@
           l2cap-att-connect
           ;; LE connection over an HCI_CHANNEL_USER socket
           nus-connect-hci
+          nus-attach
           hci-user-att-connect
           open-hci-user-socket
           close-hci-user-socket
