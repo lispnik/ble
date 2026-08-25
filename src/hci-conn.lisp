@@ -547,40 +547,6 @@ own GATT over an adapter we own starts here."
           (ignore-errors (close-hci-user-socket sock))
           (error c))))))
 
-(defun nus-connect-hci (mac &key (addr-type :random) (init-phys #x05)
-                                  (dev 0) (timeout 20) (retries 2) (mtu *att-rx-mtu*))
-  "Connect to the NUS server at MAC by taking exclusive control of hci<DEV>
-and driving LE Extended Create Connection ourselves (so we can initiate on
-Coded PHY). Discovers RX/TX, subscribes to notifications, and returns a NUS
-whose channel is the HCI connection. ADDR-TYPE is :public or :random;
-INIT-PHYS is the initiating-PHY bitmask (bit0=1M, bit2=Coded).
-
-MTU defaults to 23 (no L2CAP fragmentation needed for short commands)."
-  (let* ((peer-type (ecase addr-type (:public 0) (:random 1))))
-    (let ((conn (hci-user-att-connect mac :addr-type addr-type :init-phys init-phys
-                                          :dev dev :timeout timeout :retries retries)))
-    (handler-case
-        (let ((nus (make-nus :fd conn :mtu 23 :bdaddr-type peer-type)))
-          ;; ATT setup reuses the nus.lisp protocol code over this transport.
-          (setf (nus-mtu nus) (att-exchange-mtu conn mtu))
-          (let ((chars (att-discover-characteristics conn)))
-            (setf (nus-rx-handle nus) (char-handle-by-uuid chars +nus-rx-uuid-le+)
-                  (nus-tx-handle nus) (char-handle-by-uuid chars +nus-tx-uuid-le+))
-            (unless (and (nus-rx-handle nus) (nus-tx-handle nus))
-              (error "NUS characteristics not found (rx=~A tx=~A)"
-                     (nus-rx-handle nus) (nus-tx-handle nus)))
-            (setf (nus-cccd-handle nus)
-                  (or (att-find-cccd conn (nus-tx-handle nus))
-                      (1+ (nus-tx-handle nus))))
-            ;; ATT-SUBSCRIBE rather than a hand-rolled write whose result
-            ;; was discarded: a refused subscribe used to return a NUS that
-            ;; silently never received anything.
-            (att-subscribe conn (nus-cccd-handle nus)))
-          nus)
-      (error (c)
-        (ignore-errors (att-channel-close conn))
-        (error c))))))
-
 (defun hci-conn-close (conn)
   "Disconnect and hand the adapter back to the kernel."
   (when (and conn (hci-conn-sock conn))

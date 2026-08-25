@@ -59,7 +59,7 @@
                              (:file "teardown"   :depends-on ("hci-conn"))
                              ;; last: wraps acquire/release pairs from all of
                              ;; the above
-                             (:file "with"       :depends-on ("hci-conn" "advertiser"))))))
+                             (:file "with"       :depends-on ("hci-conn" "advertiser" "nus"))))))
 
 (asdf:defsystem #:ble/examples
   :description "Worked examples: peripherals and clients built on ble."

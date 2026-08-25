@@ -92,3 +92,46 @@ Handle-Value-Notification, or NIL on close / non-notification PDU.
 TIMEOUT-MS bounds the wait on the HCI transport (effectively blocking by
 default); the kernel-socket transport blocks regardless."
   (att-next-notification (nus-fd conn) (nus-tx-handle conn) timeout-ms))
+
+;;; --- NUS over an HCI-CONN ----------------------------------------------
+;;;
+;;; The kernel-assisted path above cannot initiate on Coded PHY, so devices
+;;; that advertise there need HCI-USER-ATT-CONNECT from hci-conn.lisp as the
+;;; transport instead. Everything after the connect is identical -- an
+;;; HCI-CONN is a drop-in ATT channel -- so only the first line differs.
+;;;
+;;; This is here rather than beside that transport because it is NUS: it
+;;; builds a NUS struct and looks for the NUS UUIDs, both defined above.
+(defun nus-connect-hci (mac &key (addr-type :random) (init-phys #x05)
+                                  (dev 0) (timeout 20) (retries 2) (mtu *att-rx-mtu*))
+  "Connect to the NUS server at MAC by taking exclusive control of hci<DEV>
+and driving LE Extended Create Connection ourselves (so we can initiate on
+Coded PHY). Discovers RX/TX, subscribes to notifications, and returns a NUS
+whose channel is the HCI connection. ADDR-TYPE is :public or :random;
+INIT-PHYS is the initiating-PHY bitmask (bit0=1M, bit2=Coded).
+
+MTU defaults to 23 (no L2CAP fragmentation needed for short commands)."
+  (let* ((peer-type (ecase addr-type (:public 0) (:random 1))))
+    (let ((conn (hci-user-att-connect mac :addr-type addr-type :init-phys init-phys
+                                          :dev dev :timeout timeout :retries retries)))
+    (handler-case
+        (let ((nus (make-nus :fd conn :mtu 23 :bdaddr-type peer-type)))
+          ;; ATT setup is att.lisp's, unchanged, over this transport.
+          (setf (nus-mtu nus) (att-exchange-mtu conn mtu))
+          (let ((chars (att-discover-characteristics conn)))
+            (setf (nus-rx-handle nus) (char-handle-by-uuid chars +nus-rx-uuid-le+)
+                  (nus-tx-handle nus) (char-handle-by-uuid chars +nus-tx-uuid-le+))
+            (unless (and (nus-rx-handle nus) (nus-tx-handle nus))
+              (error "NUS characteristics not found (rx=~A tx=~A)"
+                     (nus-rx-handle nus) (nus-tx-handle nus)))
+            (setf (nus-cccd-handle nus)
+                  (or (att-find-cccd conn (nus-tx-handle nus))
+                      (1+ (nus-tx-handle nus))))
+            ;; ATT-SUBSCRIBE rather than a hand-rolled write whose result
+            ;; was discarded: a refused subscribe used to return a NUS that
+            ;; silently never received anything.
+            (att-subscribe conn (nus-cccd-handle nus)))
+          nus)
+      (error (c)
+        (ignore-errors (att-channel-close conn))
+        (error c))))))
