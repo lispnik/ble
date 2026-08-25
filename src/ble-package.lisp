@@ -199,6 +199,7 @@
           gatt-attribute-security
           gatt-server-encrypted
           gatt-attribute-read
+          gatt-attribute-on-write
           gatt-attribute-count
           gatt-find-attribute
           gatt-set-value
@@ -207,12 +208,17 @@
           gatt-service-entry-end
           gatt-service-entry-uuid
           gatt-serve
+          gatt-add-descriptor
           *gatt-server-trace*
           *max-prepared-writes*
           +max-attribute-length+
           gatt-serve-pdu
           gatt-notify
           gatt-subscribed-p
+          ;; So a peripheral can tell that its indication was
+          ;; confirmed and it may send the next one. GATT allows
+          ;; exactly one outstanding indication per bearer.
+          +att-handle-value-cfm+
           char-properties-bitmap
           ;; Being a peripheral (src/peripheral.lisp)
           peripheral-accept

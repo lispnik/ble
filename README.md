@@ -90,22 +90,38 @@ nothing reported it.
 complete Bluetooth heart rate sensor in about 150 lines, plus the client that
 reads it — each in its own package, using only exported symbols.
 
+`examples/health-thermometer/` is the companion, and exists for what it does
+differently. A heart rate sensor notifies; a thermometer **indicates**, and an
+indication is acknowledged — only one may be outstanding at a time, so a
+peripheral that sends the next before the confirmation arrives is violating
+GATT however well it appears to work. It carries both characteristics on
+purpose: Temperature Measurement indicates the settled reading, Intermediate
+Temperature notifies the reading on its way there, and the difference sits in
+one file. Temperatures are also IEEE-11073 FLOATs rather than integers —
+decimal, so 36.85 °C is exactly 3685 × 10⁻², which binary floating point
+cannot say.
+
 That is why they are a system rather than loose scripts. Loading a file by
 hand can succeed for the wrong reason, since the reader picks up whatever
 package happens to be current; loading the system fails the way it would fail
-for a consumer. Writing these two files found two holes in the API that the
+for a consumer. Writing the heart rate example found two holes in the API that the
 library's own tests could not: an unexported `gatt-server-attributes`, and a
 peripheral having to rummage in an internal frame queue to ask whether the
-peer wanted to pair — now `smp-pairing-requested-p`.
+peer wanted to pair — now `smp-pairing-requested-p`. The thermometer found two
+more: there was no way to add a descriptor other than a CCCD, which Health
+Thermometer requires (`gatt-add-descriptor`), and no way for a peripheral to
+notice its indication had been confirmed (`+att-handle-value-cfm+`).
 
 ```sh
-make examples        # build them, and check the heart rate database
+make examples        # build them, and check both databases
 ```
 
 ```lisp
 (asdf:load-system :ble/examples)
 (heart-rate:run :dev 1)                          ; be a heart rate sensor
 (heart-rate-client:run "DC:95:E3:F9:9E:58")      ; read one
+(health-thermometer:run :dev 1)                  ; be a thermometer
+(health-thermometer-client:run "DC:95:E3:F9:9E:58")
 ```
 
 ```lisp

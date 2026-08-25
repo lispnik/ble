@@ -43,6 +43,7 @@ check: test
 # also asserts the heart rate database's layout, which needs no hardware.
 examples:
 	$(SBCL) $(SBCL_FLAGS) --load examples/heart-rate/compile-check.lisp
+	$(SBCL) $(SBCL_FLAGS) --load examples/health-thermometer/compile-check.lisp
 
 # Copy the tree, then DROP THE REMOTE FASL CACHE.
 #

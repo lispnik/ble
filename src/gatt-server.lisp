@@ -178,6 +178,31 @@ characteristic does not notify."
                 h))))
       (values value-handle cccd-handle))))
 
+(defun gatt-add-descriptor (server &key uuid value (permissions '(:read))
+                                        on-read on-write security)
+  "Add a descriptor to the characteristic most recently added. Returns its
+handle.
+
+GATT-ADD-CHARACTERISTIC already lays down a CCCD when one is called for, so
+this is for the rest: Characteristic User Description, Presentation Format,
+Valid Range -- the ones a profile can make mandatory. Health Thermometer, for
+instance, requires a Valid Range descriptor on Measurement Interval whenever
+that characteristic is writable.
+
+Descriptors belong to the characteristic they follow, so call this
+immediately after adding it and before beginning the next one; there is no
+back-reference to correct the order later."
+  (unless (gatt-server-current-service server)
+    (error "gatt-add-descriptor: no service has been started"))
+  (let ((handle (%next-handle server)))
+    (%push-attribute server (make-gatt-attribute
+                             :handle handle :uuid (%as-uuid uuid)
+                             :permissions permissions
+                             :value (%as-value value)
+                             :on-read on-read :on-write on-write
+                             :security security))
+    handle))
+
 (defun gatt-find-attribute (server handle)
   (find handle (gatt-server-attributes server) :key #'gatt-attribute-handle))
 

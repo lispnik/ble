@@ -60,6 +60,7 @@
    #:+service-device-information+
    #:+service-battery+
    #:+service-heart-rate+
+   #:+service-health-thermometer+
    #:+char-device-name+
    #:+char-appearance+
    #:+char-service-changed+
@@ -68,6 +69,10 @@
    #:+char-serial-number+
    #:+char-firmware-revision+
    #:+char-battery-level+
+   #:+char-temperature-measurement+
+   #:+char-temperature-type+
+   #:+char-intermediate-temperature+
+   #:+char-measurement-interval+
    #:+char-heart-rate-measurement+
    #:+char-body-sensor-location+
    #:+char-heart-rate-control-point+
@@ -80,6 +85,7 @@
    #:+appearance-generic-sensor+
    #:appearance
    #:service-changed-range
+   #:+descriptor-valid-range+
    #:+ad-flags+
    ;; MAC addresses (src/mac.lisp). Held on-air, LSB first, everywhere;
    ;; these two are the only place the display order exists.

@@ -24,6 +24,7 @@
 (defconstant +service-device-information+ #x180A)
 (defconstant +service-battery+            #x180F)
 (defconstant +service-heart-rate+         #x180D)
+(defconstant +service-health-thermometer+ #x1809)
 
 ;;; Vendor services are deliberately absent. The Nordic UART Service, for one,
 ;;; is a 128-bit UUID and has no 16-bit form -- writing a short one here would
@@ -43,14 +44,23 @@
 (defconstant +char-firmware-revision+     #x2A26)
 ;; Battery
 (defconstant +char-battery-level+         #x2A19)
+;; Health Thermometer
+(defconstant +char-temperature-measurement+  #x2A1C)
+(defconstant +char-temperature-type+         #x2A1D)
+(defconstant +char-intermediate-temperature+ #x2A1E)
+(defconstant +char-measurement-interval+     #x2A21)
 ;; Heart Rate
 (defconstant +char-heart-rate-measurement+ #x2A37)
 (defconstant +char-body-sensor-location+   #x2A38)
 (defconstant +char-heart-rate-control-point+ #x2A39)
 
-;;; Descriptors are not here either: the CCCD already has a name in this
-;;; library, +GATT-CCCD+, and two names for one number is the drift that named
+;;; --- descriptors --------------------------------------------------------
+;;;
+;;; The CCCD is deliberately absent: it already has a name in this library,
+;;; +GATT-CCCD+, and two names for one number is the drift that named
 ;;; constants exist to prevent.
+
+(defconstant +descriptor-valid-range+ #x2906)
 
 ;;; --- appearance ---------------------------------------------------------
 ;;;

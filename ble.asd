@@ -74,6 +74,9 @@
   :components ((:module "examples"
                 :components ((:module "heart-rate"
                               :components ((:file "heart-rate")
+                                           (:file "read-it")))
+                             (:module "health-thermometer"
+                              :components ((:file "health-thermometer")
                                            (:file "read-it")))))))
 
 (asdf:defsystem #:ble/io-tests
