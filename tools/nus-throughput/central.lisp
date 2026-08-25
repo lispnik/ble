@@ -152,9 +152,25 @@ for: the peer answers with anything inside the range it likes."
         (progn (format t "~&connection interval now ~,2F ms~%" interval) interval)
         (progn (format t "~&connection interval unchanged (~A)~%" interval) nil))))
 
+(defun use-2m (nus)
+  "Move the link to the 2M PHY, and report what it actually landed on.
+
+Halves the air time of every packet. On a link whose throughput is bounded by
+how many packets fit in a connection event, that is worth close to double --
+and it composes with the interval rather than competing with it.
+
+A peer that cannot do 2M answers with the PHY it is already using rather than
+an error, so the returned value is the one to believe."
+  (multiple-value-bind (tx rx) (ble:hci-set-phy (ble:nus-fd nus) :tx :2m :rx :2m)
+    (if (keywordp tx)
+        (format t "~&PHY now tx ~(~A~) rx ~(~A~)~%" tx rx)
+        (format t "~&PHY unchanged (~A)~%" tx))
+    tx))
+
 (defun run (&key (dev (pick-adapter 1 (env "CENTRAL_DEV" nil)))
                  (mtu (env "MTU" 247)) (seconds (env "SECONDS" 5))
-                 (interval-ms (env "INTERVAL_MS" nil)))
+                 (interval-ms (env "INTERVAL_MS" nil))
+                 (phy-2m (env "PHY_2M" nil)))
   (ble:install-adapter-teardown)
   (let ((found (ble:discover :dev dev :seconds 8
                              :filter (lambda (d)
@@ -175,6 +191,7 @@ for: the peer answers with anything inside the range it likes."
         ;; INTERVAL_MS=0 measures the default, for comparison.
         (when (and interval-ms (plusp interval-ms))
           (tighten-interval nus interval-ms (* 2 interval-ms)))
+        (when (and phy-2m (plusp phy-2m)) (use-2m nus))
         (format t "~%")
         (force-output)
 

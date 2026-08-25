@@ -15,6 +15,7 @@
 
 (defconstant +ocf-le-connection-update+     #x0013)
 (defconstant +ocf-le-read-remote-features+  #x0016)
+(defconstant +ocf-le-set-phy+               #x0032)
 (defconstant +ocf-read-remote-version+      #x001D)
 (defconstant +ogf-status-params+            #x05)
 (defconstant +ocf-read-rssi+                #x0005)
@@ -22,6 +23,7 @@
 (defconstant +hci-remote-version-evt+       #x0C)
 (defconstant +hci-command-complete-evt+     #x0E)
 (defconstant +le-conn-update-complete-evt+  #x03)   ; LE Meta subevent
+(defconstant +le-phy-update-complete-evt+   #x0C)   ; LE Meta subevent
 (defconstant +le-read-remote-features-evt+  #x04)   ; LE Meta subevent
 
 ;;; Interval and timeout are carried in the controller's own units, which are
@@ -121,6 +123,64 @@ running at."
         (t (values (interval-units-to-ms (u16-le evt 7))
                    (u16-le evt 9)
                    (timeout-units-to-ms (u16-le evt 11))))))))
+
+(defun %phy-name (code)
+  (case code (1 :1m) (2 :2m) (3 :coded) (t code)))
+
+(defun %phy-bits (phys)
+  "A PHY bitmask from a keyword, a list of them, or an integer already."
+  (if (integerp phys)
+      phys
+      (let ((phys (if (listp phys) phys (list phys))))
+        (reduce #'logior phys :initial-value 0
+                :key (lambda (p) (ecase p (:1m #x01) (:2m #x02) (:coded #x04)))))))
+
+(defun hci-set-phy (conn &key (tx :2m) (rx :2m) (coded-preference :none)
+                              handle (timeout-ms 8000) (await t))
+  "Ask to move an established connection onto another PHY.
+
+TX and RX are :1M, :2M, :CODED, or a list of them meaning `any of these\'.
+Returns (VALUES TX-PHY RX-PHY) as keywords once the change completes, or
+:TIMEOUT, :DISCONNECTED, or the status octet.
+
+This is not HCI-SET-DEFAULT-PHY, which only states a preference for future
+negotiations and says nothing about a link already up. This asks for the
+change now, on this connection.
+
+The 2M PHY halves the air time of every packet, which on a link whose
+throughput is bounded by how many packets fit in a connection event is worth
+close to double. It carries no further and is not available on every
+controller: LE Read Remote Features says whether the peer has it, and asking
+a peer that does not is answered with the PHY it is already using rather than
+an error, which is why the returned values are the ones to believe.
+
+CODED-PREFERENCE is :NONE, :S2, or :S8, and matters only when moving to the
+Coded PHY."
+  (let ((sock (%conn-sock conn))
+        (h (%conn-handle conn handle))
+        (params (make-octets 7)))
+    (u16le-put params 0 h)
+    ;; All_PHYs = 0: we are naming both directions explicitly. A bit set here
+    ;; means `no preference\', and setting it by accident hands the choice
+    ;; back to the controller -- which then reports success having changed
+    ;; nothing.
+    (setf (aref params 2) 0
+          (aref params 3) (%phy-bits tx)
+          (aref params 4) (%phy-bits rx))
+    (u16le-put params 5 (ecase coded-preference (:none 0) (:s2 1) (:s8 2)))
+    (hci-drop-events conn :event +hci-le-meta-evt+
+                          :subevent +le-phy-update-complete-evt+)
+    (send-hci-command sock +ogf-le+ +ocf-le-set-phy+ params :name "LE Set PHY")
+    (unless await (return-from hci-set-phy :requested))
+    (let ((evt (%await-hci-event conn :event +hci-le-meta-evt+
+                                      :subevent +le-phy-update-complete-evt+
+                                      :timeout-ms timeout-ms)))
+      (cond
+        ((null evt) :timeout)
+        ((eq evt :disconnected) :disconnected)
+        ((< (length evt) 9) :timeout)
+        ((/= (aref evt 4) 0) (aref evt 4))          ; HCI status
+        (t (values (%phy-name (aref evt 7)) (%phy-name (aref evt 8))))))))
 
 (defun hci-read-remote-features (conn &key handle (timeout-ms 5000))
   "The peer's LE feature bitmap, as 8 octets. :TIMEOUT, :DISCONNECTED, or the

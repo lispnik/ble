@@ -277,6 +277,7 @@
           with-advertising
           ;; Established-connection control (src/conn-params.lisp)
           hci-connection-update
+          hci-set-phy
           hci-read-remote-features
           hci-read-remote-version
           hci-read-rssi
