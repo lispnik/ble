@@ -150,7 +150,12 @@ refused with Channel Unavailable."
   server objects (current nil) channel
   name-handle type-handle size-handle id-handle props-handle
   oacp-handle oacp-cccd olcp-handle olcp-cccd
-  (pending nil) (outstanding nil))
+  (pending nil) (outstanding nil)
+  ;; A transfer in progress: what is left to send, how much there was, and
+  ;; when it started. Sent a little at a time from the tick rather than in one
+  ;; call, so the peripheral keeps answering ATT while it streams -- a lesson
+  ;; this library learned the hard way elsewhere.
+  (outbound nil) (outbound-total 0) (outbound-start 0))
 
 (defun add-object (state name content &key (type ble:+object-type-unspecified+)
                                            (properties +prop-read+))
@@ -333,12 +338,42 @@ void."
                   (server-state-pending state) nil)
             ;; And now the object itself, over the channel rather than the
             ;; attribute bearer. This is the whole reason the service exists.
+            ;; Queued rather than sent: RUN-TRANSFER streams it.
             (when payload
-              (let ((r (ble:l2cap-coc-send (server-state-channel state) payload
-                                           :timeout-ms 5000)))
-                (format t "~&  sent ~D octet(s) over the channel: ~A~%"
-                        (length payload) r)
-                (force-output)))))))))
+              (setf (server-state-outbound state) payload
+                    (server-state-outbound-total state) (length payload)
+                    (server-state-outbound-start state)
+                    (get-internal-real-time)))))))))
+
+(defun run-transfer (state conn)
+  "Push a little of the object down the channel. Called every tick.
+
+A burst at a time, not the whole object: L2CAP-COC-SEND blocks when the peer
+has issued no credits, and a peripheral that blocks for long stops answering
+ATT. Bounded here, it streams at whatever rate the peer returns credits and
+stays responsive between."
+  (declare (ignorable conn))
+  (let ((left (server-state-outbound state))
+        (coc (server-state-channel state)))
+    (when (and left coc)
+      (let ((mtu (max 1 (min 512 (ble:l2cap-coc-peer-mtu coc)))))
+        (loop repeat 4
+              while (plusp (length left))
+              do (let* ((n (min mtu (length left)))
+                        (r (ble:l2cap-coc-send coc (subseq left 0 n)
+                                               :timeout-ms 500)))
+                   (unless (eq r t) (return))       ; no credits yet; next tick
+                   (setf left (subseq left n))))
+        (setf (server-state-outbound state) left)
+        (when (zerop (length left))
+          (let* ((total (server-state-outbound-total state))
+                 (secs (/ (float (- (get-internal-real-time)
+                                    (server-state-outbound-start state)))
+                          internal-time-units-per-second)))
+            (setf (server-state-outbound state) nil)
+            (format t "~&  sent ~D octet(s) in ~,2F s = ~,1F kbit/s~%"
+                    total secs (if (plusp secs) (/ (* 8 total) secs 1000.0) 0))
+            (force-output)))))))
 
 ;;; --- the database -------------------------------------------------------
 
@@ -416,6 +451,12 @@ not a characteristic. That is what Object Transfer is for.")
     ;; One object the server will refuse to read, so the difference between
     ;; `cannot' and `may not' is visible from the client.
     (add-object state "private.key" "not for you" :properties 0)
+    ;; And one big enough to measure. A few dozen octets tells you about the
+    ;; control point round trip; this tells you about the channel.
+    (add-object state "bulk.dat"
+                (let ((v (make-array 32768 :element-type '(unsigned-byte 8))))
+                  (dotimes (i (length v) v)
+                    (setf (aref v i) (logand i #xFF)))))
     (publish-current state)
     (ble:install-adapter-teardown)
     (ble:with-hci-user-socket (sock dev)
@@ -468,4 +509,5 @@ not a characteristic. That is what Object Transfer is for.")
                  (format t "~&  channel open: mtu ~D, ~D credit(s) to send with~%"
                          (ble:l2cap-coc-peer-mtu coc) (ble:l2cap-coc-tx-credits coc))
                  (force-output))))
-           (run-pending state conn)))))))
+           (run-pending state conn)
+           (run-transfer state conn)))))))

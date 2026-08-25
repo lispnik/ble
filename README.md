@@ -742,14 +742,19 @@ it waits, because the event that refunds a credit arrives on the transport
 being pumped. `tools/nus-throughput/` is what found this, and measures what is
 left once the sender is made to wait:
 
-| direction | rate | packets |
+| path | rate | detail |
 |---|---|---|
-| central → peripheral (Write Command) | 35.1 kbit/s | 18/s of 244 octets |
-| peripheral → central (notifications) | 26.4 kbit/s | 14/s |
+| NUS, central → peripheral (Write Command) | 35.1 kbit/s | 18/s of 244 octets |
+| NUS, peripheral → central (notifications) | 26.4 kbit/s | 14/s |
+| L2CAP CoC, 32 KB object (`examples/object-transfer/`) | 25.2 kbit/s | 64 SDUs of 512 |
 
-Zero backpressure stalls, and both ends' byte counts agree. Those numbers are
-bounded by the connection interval and the 27-octet ACL fragment, not by the
-PHY — this stack requests neither a faster interval nor Data Length Extension.
+Zero backpressure stalls, and in every case the two ends' independent byte
+counts agree. Note that the connection-oriented channel is **not** faster than
+notifications — 25 against 26 kbit/s — because the bottleneck is under both of
+them: the connection interval and the 27-octet ACL fragment. A 512-octet SDU
+is six L2CAP frames and around twenty ACL packets before it reaches the air.
+This stack requests neither a faster interval nor Data Length Extension, and
+those are what would move these numbers.
 
 ## Commands the controller refused
 

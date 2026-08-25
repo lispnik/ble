@@ -52,8 +52,11 @@
         (olcp-result-name (aref r 2))
         :no-reply)))
 
-(defun run (mac &key (dev 2) (addr-type :random) (want nil))
-  "Walk the object list, then download WANT (a name) or the first readable one."
+(defun run (mac &key (dev 2) (addr-type :random) (want "bulk.dat"))
+  "Walk the object list, then download WANT (a name) or the first readable one.
+
+Defaults to the big object, because a rate measured over a few dozen octets
+is a measurement of the control point round trip rather than of the channel."
   (ble:install-adapter-teardown)
   (ble:with-att-channel
       (chan (ble:hci-user-att-connect (ble:parse-mac mac) :addr-type addr-type
@@ -136,9 +139,37 @@
                             :no-reply))
                 (force-output)
                 (when (and r (>= (length r) 3) (= 1 (aref r 2)))
-                  (let ((sdu (ble:l2cap-coc-recv coc :timeout-ms 10000)))
-                    (if (and sdu (not (eq sdu :disconnected)))
-                        (format t "~&--- ~D octet(s) received ---~%~A~%---~%"
-                                (length sdu) (map 'string #'code-char sdu))
-                        (format t "~&nothing arrived on the channel: ~A~%" sdu)))))
+                  ;; An object arrives as one or more SDUs -- anything past the
+                  ;; channel MTU has to. So read until the size the metadata
+                  ;; promised, not until the first thing lands.
+                  (let ((want (f-size target))
+                        (got 0) (sdus 0) (first-at nil) (last-at nil)
+                        (sample nil))
+                    (loop while (< got want)
+                          for sdu = (ble:l2cap-coc-recv coc :timeout-ms 10000)
+                          do (cond
+                               ((or (null sdu) (eq sdu :disconnected))
+                                (format t "~&channel went quiet after ~D of ~D ~
+                                           octet(s)~%" got want)
+                                (return))
+                               (t (unless first-at
+                                    (setf first-at (get-internal-real-time)
+                                          sample (subseq sdu 0 (min 48 (length sdu)))))
+                                  (setf last-at (get-internal-real-time))
+                                  (incf got (length sdu))
+                                  (incf sdus))))
+                    ;; Timed first SDU to last: the gap before the server
+                    ;; starts is the control point round trip, not the channel.
+                    (let ((secs (if (and first-at last-at (> last-at first-at))
+                                    (/ (float (- last-at first-at))
+                                       internal-time-units-per-second)
+                                    0)))
+                      (format t "~&received ~D octet(s) in ~D SDU(s)~@[ in ~,2F s ~
+                                 = ~,1F kbit/s~]~%"
+                              got sdus (and (plusp secs) secs)
+                              (and (plusp secs) (/ (* 8 got) secs 1000.0)))
+                      (when (and sample (every (lambda (c) (< 31 c 127)) sample))
+                        (format t "~&--- begins ---~%~A~%---~%"
+                                (map 'string #'code-char sample)))
+                      (force-output)))))
               (ble:l2cap-coc-close coc))))))))
