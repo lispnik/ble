@@ -63,6 +63,7 @@
    #:+service-health-thermometer+
    #:+service-glucose+
    #:+service-environmental-sensing+
+   #:+service-object-transfer+
    #:+char-device-name+
    #:+char-appearance+
    #:+char-service-changed+
@@ -71,6 +72,14 @@
    #:+char-serial-number+
    #:+char-firmware-revision+
    #:+char-battery-level+
+   #:+char-ots-feature+
+   #:+char-object-name+
+   #:+char-object-type+
+   #:+char-object-size+
+   #:+char-object-id+
+   #:+char-object-properties+
+   #:+char-object-action-control-point+
+   #:+char-object-list-control-point+
    #:+char-temperature+
    #:+char-humidity+
    #:+char-pressure+

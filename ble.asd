@@ -85,6 +85,9 @@
                                            (:file "read-it")))
                              (:module "environmental-sensing"
                               :components ((:file "environmental-sensing")
+                                           (:file "read-it")))
+                             (:module "object-transfer"
+                              :components ((:file "object-transfer")
                                            (:file "read-it")))))))
 
 (asdf:defsystem #:ble/io-tests

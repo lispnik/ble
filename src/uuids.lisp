@@ -27,6 +27,7 @@
 (defconstant +service-health-thermometer+ #x1809)
 (defconstant +service-glucose+            #x1808)
 (defconstant +service-environmental-sensing+ #x181A)
+(defconstant +service-object-transfer+    #x1825)
 
 ;;; Vendor services are deliberately absent. The Nordic UART Service, for one,
 ;;; is a 128-bit UUID and has no 16-bit form -- writing a short one here would
@@ -46,6 +47,17 @@
 (defconstant +char-firmware-revision+     #x2A26)
 ;; Battery
 (defconstant +char-battery-level+         #x2A19)
+;; Object Transfer. The metadata of whichever object is currently selected;
+;; the object's own bytes never cross an attribute, they go over an L2CAP
+;; connection-oriented channel.
+(defconstant +char-ots-feature+                    #x2ABD)
+(defconstant +char-object-name+                    #x2ABE)
+(defconstant +char-object-type+                    #x2ABF)
+(defconstant +char-object-size+                    #x2AC0)
+(defconstant +char-object-id+                      #x2AC3)
+(defconstant +char-object-properties+              #x2AC4)
+(defconstant +char-object-action-control-point+    #x2AC5)
+(defconstant +char-object-list-control-point+      #x2AC6)
 ;; Environmental Sensing. Any of these may appear more than once in one
 ;; service -- three Temperatures for indoor, outdoor and a probe is the
 ;; ordinary case -- so a client cannot look them up by UUID and stop.

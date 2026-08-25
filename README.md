@@ -128,6 +128,16 @@ the others do not have — a service carrying the same characteristic more than
 once. Three Temperatures, all `0x2A6E`, told apart only by their descriptors.
 Look one up by UUID and you have silently picked one of three.
 
+`examples/object-transfer/` is the only one whose payload never crosses an
+attribute. Everything else notifies, which caps a message at the ATT MTU;
+Object Transfer is the SIG's answer to that, and the only adopted profile that
+opens an **L2CAP connection-oriented channel** — a real stream with
+credit-based flow control, alongside the ATT bearer on the same connection. So
+it has two halves that must agree: GATT carries the metadata and two control
+points, and the bytes go over the channel. Ask to read without opening the
+channel first and you are refused with Channel Unavailable, because the server
+has nowhere to put the answer.
+
 That is why they are a system rather than loose scripts. Loading a file by
 hand can succeed for the wrong reason, since the reader picks up whatever
 package happens to be current; loading the system fails the way it would fail
@@ -157,6 +167,7 @@ make examples        # build them, and check every database
 (health-thermometer-client:run "DC:95:E3:F9:9E:58")
 (glucose:run :dev 1)                             ; be a glucose meter
 (environmental-sensing:run :dev 1)               ; be a weather station
+(object-transfer:run :dev 1)                     ; serve objects over L2CAP
 ```
 
 ```lisp
