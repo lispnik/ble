@@ -65,6 +65,11 @@
           scan-reports
           discover
           discovered
+          ;; The constructor too, for the same reason as
+          ;; MAKE-GATT-CHAR: a consumer's filter predicate is
+          ;; testable without a radio only if it can be handed
+          ;; a DISCOVERED that no radio produced.
+          make-discovered
           discovered-p
           discovered-address
           discovered-addr-type

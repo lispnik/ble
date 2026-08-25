@@ -86,7 +86,19 @@ nothing reported it.
 
 ## Writing a peripheral
 
-`ble/examples` is a system of worked ones. `examples/heart-rate/` is a
+`ble/examples` is a system of worked ones.
+
+`examples/scanner/` comes first because it is what you do first. Every other
+client here takes a MAC address, and this is where the address comes from —
+`(scanner:find-service ble:+service-health-thermometer+)` hands back the
+thermometer. It is also the only example that scans, and so the only one that
+touches the **Coded PHY**: `start-extended-scan` listens on 1M and Coded
+together, and a fleet advertising long-range is simply invisible to anything
+that does not. Its `watch` prints reports unmerged, which is worth running
+once to see why merging exists — the name arrives in a scan response and the
+service UUIDs in the advertisement, so a report is not a device.
+
+`examples/heart-rate/` is a
 complete Bluetooth heart rate sensor in about 150 lines, plus the client that
 reads it — each in its own package, using only exported symbols.
 
@@ -137,6 +149,8 @@ make examples        # build them, and check every database
 
 ```lisp
 (asdf:load-system :ble/examples)
+(scanner:survey :dev 1)                          ; what is out there?
+(scanner:find-service ble:+service-heart-rate+)  ; ...and where is the belt
 (heart-rate:run :dev 1)                          ; be a heart rate sensor
 (heart-rate-client:run "DC:95:E3:F9:9E:58")      ; read one
 (health-thermometer:run :dev 1)                  ; be a thermometer

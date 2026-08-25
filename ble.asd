@@ -72,7 +72,9 @@
   ;; what makes that fail loudly instead of quietly working because the file
   ;; happened to be read inside the right package.
   :components ((:module "examples"
-                :components ((:module "heart-rate"
+                :components ((:module "scanner"
+                              :components ((:file "scanner")))
+                             (:module "heart-rate"
                               :components ((:file "heart-rate")
                                            (:file "read-it")))
                              (:module "health-thermometer"

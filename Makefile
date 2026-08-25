@@ -42,6 +42,7 @@ check: test
 # an example that has quietly stopped compiling is worse than no example. This
 # also asserts the heart rate database's layout, which needs no hardware.
 examples:
+	$(SBCL) $(SBCL_FLAGS) --load examples/scanner/compile-check.lisp
 	$(SBCL) $(SBCL_FLAGS) --load examples/heart-rate/compile-check.lisp
 	$(SBCL) $(SBCL_FLAGS) --load examples/health-thermometer/compile-check.lisp
 	$(SBCL) $(SBCL_FLAGS) --load examples/glucose/compile-check.lisp
