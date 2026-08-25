@@ -35,18 +35,22 @@ mutate and nobody else holds a reference to it."
 
 (test extract-manufacturer-data-matches-any-vendor-by-default
   ;; one AD record: length 5, type FF, company 004C (Apple), payload DE AD
+  ;; 0xFFFF is the identifier the SIG reserves for testing and internal use,
+  ;; which is what this is. 0x004C is Apple's, and stays: the point of the
+  ;; next test is that ANOTHER vendor's record is walked past, and two
+  ;; distinct real-looking ids make that legible.
   (let ((blob (hex->octets "05FF4C00DEAD")))
     (is (equalp (hex->octets "DEAD") (ble:extract-manufacturer-data blob)))
     (is (equalp (hex->octets "DEAD")
                 (ble:extract-manufacturer-data blob :company-id #x004C)))
-    (is (null (ble:extract-manufacturer-data blob :company-id #x0292))
+    (is (null (ble:extract-manufacturer-data blob :company-id #xFFFF))
         "a different company id must not match")))
 
 (test extract-manufacturer-data-walks-past-other-records
   ;; flags record first, then the manufacturer one
-  (let ((blob (hex->octets "020106" "05FF9202BEEF")))
+  (let ((blob (hex->octets "020106" "05FFFFFFBEEF")))
     (is (equalp (hex->octets "BEEF")
-                (ble:extract-manufacturer-data blob :company-id #x0292)))))
+                (ble:extract-manufacturer-data blob :company-id #xFFFF)))))
 
 (test extract-manufacturer-data-survives-malformed-input
   (is (null (ble:extract-manufacturer-data (hex->octets "00"))) "zero length terminates")

@@ -7,9 +7,8 @@
 ;;; any other profile would; there is nothing privileged about it.
 ;;;
 ;;; It is here because a great many hobbyist and vendor peripherals expose it
-;;; as their transport, so having it ready saves rewriting the same forty
-;;; lines. The UD18 power meter that drove much of this library's development
-;;; speaks it, and so does anything built on Nordic's stack.
+;;; as their transport -- anything built on Nordic's stack tends to -- so
+;;; having it ready saves rewriting the same forty lines.
 ;;;
 ;;;   Service 6E400001-B5A3-F393-E0A9-E50E24DCCA9E
 ;;;   RX      6E400002-...  Write / Write-Without-Response: host -> device

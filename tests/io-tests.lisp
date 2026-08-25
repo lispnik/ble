@@ -150,9 +150,9 @@ will retry a device that was never going to have the characteristic."
 
 ;;; --- RSSI and adapter labels -------------------------------------------
 ;;;
-;;; These were in bledecode's CLI suite, testing this library's code from a
-;;; consumer, because at the time ble had no suite that could load ble. It
-;;; does now.
+;;; Report parsing and adapter labelling: the two places where a wrong offset
+;;; produces a plausible number rather than an error, so they are worth
+;;; asserting on rather than eyeballing in a scan.
 
 (test rssi-not-available-sentinel
   "0x7F is the spec's \"RSSI is not available\". Taken literally it renders as
