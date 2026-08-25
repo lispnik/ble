@@ -25,6 +25,7 @@
 (defconstant +service-battery+            #x180F)
 (defconstant +service-heart-rate+         #x180D)
 (defconstant +service-health-thermometer+ #x1809)
+(defconstant +service-glucose+            #x1808)
 
 ;;; Vendor services are deliberately absent. The Nordic UART Service, for one,
 ;;; is a 128-bit UUID and has no 16-bit form -- writing a short one here would
@@ -44,6 +45,14 @@
 (defconstant +char-firmware-revision+     #x2A26)
 ;; Battery
 (defconstant +char-battery-level+         #x2A19)
+;; Glucose
+(defconstant +char-glucose-measurement+         #x2A18)
+(defconstant +char-glucose-measurement-context+ #x2A34)
+(defconstant +char-glucose-feature+             #x2A51)
+;; Not a glucose characteristic as such -- the Record Access Control Point is
+;; the SIG's generic stored-records protocol, and Continuous Glucose
+;; Monitoring and Insulin Delivery use the same number for the same thing.
+(defconstant +char-record-access-control-point+ #x2A52)
 ;; Health Thermometer
 (defconstant +char-temperature-measurement+  #x2A1C)
 (defconstant +char-temperature-type+         #x2A1D)
@@ -72,6 +81,10 @@
 (defconstant +appearance-generic-phone+     #x0040)
 (defconstant +appearance-generic-tag+       #x0200)
 (defconstant +appearance-generic-thermometer+ #x0300)
+;; Category 16 of 64 values each: 16 * 64 = 0x0400. The thermometer
+;; above is category 12 and the heart rate sensor 13, which is the
+;; arithmetic to check this against.
+(defconstant +appearance-generic-glucose-meter+ #x0400)
 (defconstant +appearance-heart-rate-sensor+ #x0340)
 (defconstant +appearance-heart-rate-belt+   #x0341)
 (defconstant +appearance-generic-sensor+    #x0540)
@@ -85,6 +98,29 @@ different, valid appearance that simply draws the wrong icon."
   (let ((v (make-octets 2)))
     (u16le-put v 0 value)
     v))
+
+;;; --- date time ----------------------------------------------------------
+
+(defun date-time (&optional (universal-time (get-universal-time)))
+  "The seven octets of a Date Time (0x2A08): year, month, day, h, m, s.
+
+Little-endian year, every other field one octet. A zero year, month or day
+means `unknown', which is what a device without a real clock should send
+rather than a plausible-looking lie.
+
+Here rather than in the profile that needs it because several do -- Health
+Thermometer stamps a measurement with it, Glucose stamps a stored record --
+and it is the SIG's structure in all of them."
+  (multiple-value-bind (sec min hour day month year)
+      (decode-universal-time universal-time)
+    (let ((v (make-octets 7)))
+      (u16le-put v 0 year)
+      (setf (aref v 2) month
+            (aref v 3) day
+            (aref v 4) hour
+            (aref v 5) min
+            (aref v 6) sec)
+      v)))
 
 ;;; --- service changed ----------------------------------------------------
 

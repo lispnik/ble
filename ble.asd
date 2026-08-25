@@ -77,6 +77,9 @@
                                            (:file "read-it")))
                              (:module "health-thermometer"
                               :components ((:file "health-thermometer")
+                                           (:file "read-it")))
+                             (:module "glucose"
+                              :components ((:file "glucose")
                                            (:file "read-it")))))))
 
 (asdf:defsystem #:ble/io-tests

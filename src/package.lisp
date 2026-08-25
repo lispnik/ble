@@ -61,6 +61,7 @@
    #:+service-battery+
    #:+service-heart-rate+
    #:+service-health-thermometer+
+   #:+service-glucose+
    #:+char-device-name+
    #:+char-appearance+
    #:+char-service-changed+
@@ -69,6 +70,10 @@
    #:+char-serial-number+
    #:+char-firmware-revision+
    #:+char-battery-level+
+   #:+char-glucose-measurement+
+   #:+char-glucose-measurement-context+
+   #:+char-glucose-feature+
+   #:+char-record-access-control-point+
    #:+char-temperature-measurement+
    #:+char-temperature-type+
    #:+char-intermediate-temperature+
@@ -80,11 +85,13 @@
    #:+appearance-generic-phone+
    #:+appearance-generic-tag+
    #:+appearance-generic-thermometer+
+   #:+appearance-generic-glucose-meter+
    #:+appearance-heart-rate-sensor+
    #:+appearance-heart-rate-belt+
    #:+appearance-generic-sensor+
    #:appearance
    #:service-changed-range
+   #:date-time
    #:+descriptor-valid-range+
    #:+ad-flags+
    ;; MAC addresses (src/mac.lisp). Held on-air, LSB first, everywhere;

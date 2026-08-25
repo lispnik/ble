@@ -186,6 +186,10 @@
           gatt-server-p
           gatt-server-mtu
           gatt-server-rx-mtu
+          ;; The subscription state, keyed by CCCD handle. Its
+          ;; siblings are all exported, and a peripheral's own
+          ;; tests need to stand in for a client that subscribed.
+          gatt-server-cccd
           gatt-server-services
           gatt-server-attributes
           gatt-add-service
@@ -200,6 +204,10 @@
           gatt-server-encrypted
           gatt-attribute-read
           gatt-attribute-on-write
+          ;; An ON-WRITE handler returns an ATT error code to refuse
+          ;; the write, so a consumer writing one needs a name for at
+          ;; least the length check it cannot make the server do.
+          +att-err-invalid-value-length+
           gatt-attribute-count
           gatt-find-attribute
           gatt-set-value

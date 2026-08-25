@@ -87,24 +87,6 @@ mantissa into a different temperature."
 
 ;;; --- the measurement ----------------------------------------------------
 
-(defun date-time (&optional (universal-time (get-universal-time)))
-  "The seven octets of a Date Time (0x2A08): year, month, day, h, m, s.
-
-Little-endian year, and every other field one octet. A zero month or day
-means `unknown', which is what a device without a real clock should send
-rather than a plausible-looking lie."
-  (multiple-value-bind (sec min hour day month year)
-      (decode-universal-time universal-time)
-    (let ((out (make-array 7 :element-type '(unsigned-byte 8))))
-      (setf (aref out 0) (ldb (byte 8 0) year)
-            (aref out 1) (ldb (byte 8 8) year)
-            (aref out 2) month
-            (aref out 3) day
-            (aref out 4) hour
-            (aref out 5) min
-            (aref out 6) sec)
-      out)))
-
 (defun temperature-measurement (celsius &key timestamp type (units :celsius))
   "Encode a Temperature Measurement (0x2A1C) or Intermediate Temperature.
 
@@ -120,7 +102,8 @@ the value in the units you name."
                         (if timestamp #x02 0)
                         (if type #x04 0)))
          (stamp (when timestamp
-                  (date-time (if (eq timestamp t) (get-universal-time) timestamp))))
+                  (ble:date-time (if (eq timestamp t)
+                                     (get-universal-time) timestamp))))
          (out (make-array 0 :element-type '(unsigned-byte 8)
                             :adjustable t :fill-pointer t)))
     (vector-push-extend flags out)
