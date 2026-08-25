@@ -131,8 +131,30 @@ blasts for that many seconds. Everything after it is payload."
                 (elapsed start))
             packets)))
 
+(defun tighten-interval (nus min-ms max-ms)
+  "Ask for a shorter connection interval, and report what we actually got.
+
+This is the one lever that costs nothing to pull: the library has had
+HCI-CONNECTION-UPDATE all along and no example or benchmark called it, so
+every measurement here was taken at whatever the peripheral's controller
+chose -- around 45 ms, inferred from the credit-batch rate.
+
+Credits come back once per connection event, so the event rate is the packet
+rate. Everything else about throughput on this stack is downstream of it.
+
+The returned interval is the one in force, which need not be the one asked
+for: the peer answers with anything inside the range it likes."
+  (multiple-value-bind (interval latency timeout)
+      (ble:hci-connection-update (ble:nus-fd nus)
+                                 :min-interval-ms min-ms :max-interval-ms max-ms)
+    (declare (ignorable latency timeout))
+    (if (numberp interval)
+        (progn (format t "~&connection interval now ~,2F ms~%" interval) interval)
+        (progn (format t "~&connection interval unchanged (~A)~%" interval) nil))))
+
 (defun run (&key (dev (pick-adapter 1 (env "CENTRAL_DEV" nil)))
-                 (mtu (env "MTU" 247)) (seconds (env "SECONDS" 5)))
+                 (mtu (env "MTU" 247)) (seconds (env "SECONDS" 5))
+                 (interval-ms (env "INTERVAL_MS" nil)))
   (ble:install-adapter-teardown)
   (let ((found (ble:discover :dev dev :seconds 8
                              :filter (lambda (d)
@@ -147,8 +169,13 @@ blasts for that many seconds. Everything after it is payload."
       (ble:with-nus-hci (nus mac :dev dev :addr-type :random
                                  :init-phys #x01 :mtu mtu :timeout 25)
         (unless nus (error "could not open NUS"))
-        (format t "~&connected, negotiated MTU ~D (~D octet payload per packet)~%~%"
+        (format t "~&connected, negotiated MTU ~D (~D octet payload per packet)~%"
                 (ble:nus-mtu nus) (- (ble:nus-mtu nus) 3))
+        (force-output)
+        ;; INTERVAL_MS=0 measures the default, for comparison.
+        (when (and interval-ms (plusp interval-ms))
+          (tighten-interval nus interval-ms (* 2 interval-ms)))
+        (format t "~%")
         (force-output)
 
         (multiple-value-bind (sent secs stalls chunk) (measure-uplink nus seconds)

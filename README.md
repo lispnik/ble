@@ -742,19 +742,30 @@ it waits, because the event that refunds a credit arrives on the transport
 being pumped. `tools/nus-throughput/` is what found this, and measures what is
 left once the sender is made to wait:
 
-| path | rate | detail |
+| path | default interval | at 7.5 ms |
 |---|---|---|
-| NUS, central → peripheral (Write Command) | 35.1 kbit/s | 18/s of 244 octets |
-| NUS, peripheral → central (notifications) | 26.4 kbit/s | 14/s |
-| L2CAP CoC, 32 KB object (`examples/object-transfer/`) | 25.2 kbit/s | 64 SDUs of 512 |
+| NUS, central → peripheral (Write Command) | 34.9 kbit/s | **204.8 kbit/s** |
+| NUS, peripheral → central (notifications) | 26.4 kbit/s | **154.5 kbit/s** |
+| L2CAP CoC, 32 KB object (`examples/object-transfer/`) | 25.2 kbit/s | — |
 
-Zero backpressure stalls, and in every case the two ends' independent byte
-counts agree. Note that the connection-oriented channel is **not** faster than
-notifications — 25 against 26 kbit/s — because the bottleneck is under both of
-them: the connection interval and the 27-octet ACL fragment. A 512-octet SDU
-is six L2CAP frames and around twenty ACL packets before it reaches the air.
-This stack requests neither a faster interval nor Data Length Extension, and
-those are what would move these numbers.
+Zero backpressure stalls throughout, and in every case the two ends'
+independent byte counts agree.
+
+**The connection interval is the whole game.** Credits come back once per
+connection event, so the event rate *is* the packet rate and everything else
+is downstream of it. The peripheral's controller was choosing about 45 ms;
+asking for 7.5 ms with `hci-connection-update` — which this library has always
+had, and which no example or benchmark called — multiplied both directions by
+5.9, against a predicted 6.
+
+What is left is worth knowing for what it is not. The connection-oriented
+channel is *not* faster than notifications (25 against 26 kbit/s at the same
+interval): a 512-octet SDU is six L2CAP frames and about twenty ACL packets
+before it reaches the air, so CoC buys arbitrary-length SDUs and its own flow
+control, not speed. Beyond the interval, the remaining levers are the 2M PHY
+(`LE Set PHY` on a live connection, not implemented) and Data Length Extension
+(`LE Set Data Length`, not implemented) — the latter uncertain here, since
+these dongles report the specification-minimum 27-octet LE ACL buffer.
 
 ## Commands the controller refused
 
