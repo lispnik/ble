@@ -89,31 +89,48 @@ off or the peer sent no identity.
 SESSION and PEER are filled in as a connection proceeds and reset for the
 next one."
   local-addr local-addr-type irk io-capability passkey request bond on-paired
-  peer peer-type session asked)
+  peer peer-type session asked
+  ;; Key collection runs across ticks rather than in one blocking
+  ;; call. COLLECT-UNTIL is when to stop waiting for a peer that is
+  ;; not going to send any; SETTLED is set once the outcome, keys or
+  ;; no keys, has been dealt with.
+  collect-until settled)
 
 (defun %pairing-reset (p peer peer-type)
   (setf (peripheral-pairing-peer p) peer
         (peripheral-pairing-peer-type p) peer-type
         (peripheral-pairing-session p) nil
-        (peripheral-pairing-asked p) nil))
+        (peripheral-pairing-asked p) nil
+        (peripheral-pairing-collect-until p) nil
+        (peripheral-pairing-settled p) nil))
 
-(defun %pairing-collect-keys (p conn)
-  "After encryption: distribute our identity, take the peer's, store a bond."
-  (let ((session (peripheral-pairing-session p)))
-    (when (and (peripheral-pairing-bond p) (smp-session-p session))
-      (ignore-errors
-       (smp-send-identity session
-                          :irk (peripheral-pairing-irk p)
-                          :identity-addr (peripheral-pairing-local-addr p)
-                          :identity-addr-type (peripheral-pairing-local-addr-type p))
-       (smp-receive-keys session :timeout-ms 8000)
-       (let ((b (bond-from-session
-                 session
-                 :identity-addr (peripheral-pairing-peer p)
-                 :identity-addr-type (peripheral-pairing-peer-type p))))
-         (store-bond b)
-         (return-from %pairing-collect-keys b))))
-    nil))
+(defun %pairing-settle (p conn)
+  "Finish a pairing: store the bond and tell the caller. Once per connection."
+  (declare (ignorable conn))
+  (setf (peripheral-pairing-settled p) t
+        (peripheral-pairing-collect-until p) nil)
+  (let* ((session (peripheral-pairing-session p))
+         (bond (when (and (peripheral-pairing-bond p) (smp-session-p session))
+                 (ignore-errors
+                  (let ((b (bond-from-session
+                            session
+                            :identity-addr (peripheral-pairing-peer p)
+                            :identity-addr-type (peripheral-pairing-peer-type p))))
+                    (store-bond b)
+                    b)))))
+    (when (peripheral-pairing-on-paired p)
+      (funcall (peripheral-pairing-on-paired p) conn session bond))
+    bond))
+
+(defun %pairing-disconnected (p conn)
+  "The peer left. Settle anything still in flight.
+
+A central that got what it came for and disconnected inside the collection
+window would otherwise leave the pairing unreported and its bond unstored --
+which is most of them, since a short session is the normal case."
+  (when (and p (not (peripheral-pairing-settled p))
+             (smp-session-p (peripheral-pairing-session p)))
+    (ignore-errors (%pairing-settle p conn))))
 
 (defun %drive-pairing (p server conn)
   "One tick's worth of pairing. Called from SERVE-PERIPHERAL.
@@ -138,15 +155,36 @@ socket, because HCI-PUMP is the only reader and a second one would race it."
                                  :session (and (smp-session-p session) session)
                                  :ltk (and known (bond-ltk known)))))))
   ;; Encryption Change: the only thing that may set the server encrypted.
+  ;; Keys are distributed over the encrypted link, so this is where collecting
+  ;; them begins -- but it does NOT wait for them here. Waiting would stop this
+  ;; peripheral answering ATT, and a peer whose request times out gets its
+  ;; response late and every response after that belongs to the request before
+  ;; it. That desync survives the pairing and looks like anything but pairing.
   (let ((enc (hci-take-event conn :event #x08)))
     (when (and enc (>= (length enc) 7))
       (let ((ok (and (zerop (aref enc 3)) (= 1 (aref enc 6)))))
         (setf (gatt-server-encrypted server) ok)
-        (when ok
-          (let ((b (%pairing-collect-keys p conn)))
-            (when (peripheral-pairing-on-paired p)
-              (funcall (peripheral-pairing-on-paired p)
-                       conn (peripheral-pairing-session p) b)))))))
+        (cond
+          ((not ok) (setf (peripheral-pairing-settled p) t))
+          ((and (peripheral-pairing-bond p)
+                (smp-session-p (peripheral-pairing-session p)))
+           (ignore-errors
+            (smp-send-identity (peripheral-pairing-session p)
+                               :irk (peripheral-pairing-irk p)
+                               :identity-addr (peripheral-pairing-local-addr p)
+                               :identity-addr-type (peripheral-pairing-local-addr-type p)))
+           (setf (peripheral-pairing-collect-until p)
+                 (+ (get-internal-real-time)
+                    (* 5 internal-time-units-per-second))))
+          (t (%pairing-settle p conn))))))
+  ;; Collecting, a tick at a time. A peer that distributes nothing is not an
+  ;; error -- it simply cannot be recognised at a new address later -- so the
+  ;; deadline settles the pairing rather than failing it.
+  (let ((until (peripheral-pairing-collect-until p)))
+    (when (and until (not (peripheral-pairing-settled p)))
+      (when (or (smp-poll-keys (peripheral-pairing-session p))
+                (> (get-internal-real-time) until))
+        (%pairing-settle p conn))))
   ;; A Pairing Request from the peer arrives on the SMP channel.
   (when (and (smp-pairing-requested-p conn)
              (not (smp-session-p (peripheral-pairing-session p))))
@@ -217,11 +255,13 @@ loses simply never sees them."
               (let ((r (hci-pump conn tick-ms)))
                 (if (eq r :disconnected)
                     (progn
+                      (when pairing (%pairing-disconnected pairing conn))
                       (when on-disconnect (funcall on-disconnect conn))
                       (setf conn nil))
                     (let ((op (gatt-serve server conn :timeout-ms 0)))
                       (if (eq op :disconnected)
                           (progn
+                            (when pairing (%pairing-disconnected pairing conn))
                             (when on-disconnect (funcall on-disconnect conn))
                             (setf conn nil))
                           (progn

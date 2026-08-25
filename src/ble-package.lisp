@@ -336,6 +336,8 @@
           smp-session-peer-identity-addr-type
           smp-send-identity
           smp-receive-keys
+          smp-poll-keys
+          smp-keys-complete-p
           smp-session-mackey
           smp-start-encryption
           smp-answer-ltk-request

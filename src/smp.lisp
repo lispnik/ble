@@ -705,30 +705,56 @@ it stays trackable by devices you have bonded with and by nobody else."
               (cat (vector (ecase identity-addr-type (:public 0) (:random 1)))
                    identity-addr))))
 
+(defun %absorb-key-pdu (session pdu)
+  "Take one distributed key out of PDU, if it carries one."
+  (when (and pdu (vectorp pdu) (plusp (length pdu)))
+    (let ((op (aref pdu 0)))
+      (cond
+        ((and (= op +smp-identity-information+) (>= (length pdu) 17))
+         (setf (smp-session-peer-irk session) (msb (subseq pdu 1 17)))
+         (%trace-value "peer IRK" (smp-session-peer-irk session)))
+        ((and (= op +smp-identity-address-information+) (>= (length pdu) 8))
+         (setf (smp-session-peer-identity-addr-type session)
+               (if (= 1 (aref pdu 1)) :random :public)
+               (smp-session-peer-identity-addr session) (subseq pdu 2 8))
+         (%trace-value "peer identity"
+                       (smp-session-peer-identity-addr session)))))))
+
+(defun smp-keys-complete-p (session)
+  "Has the peer distributed both an IRK and the address it belongs to?"
+  (and (smp-session-peer-irk session)
+       (smp-session-peer-identity-addr session)
+       t))
+
+(defun smp-poll-keys (session)
+  "Absorb whatever the peer has already sent, without waiting for more.
+
+The non-blocking half of SMP-RECEIVE-KEYS, for a caller that cannot afford to
+stop. A peripheral serving GATT is exactly that: blocking here for keys the
+peer may never send stops it answering ATT, and the peer's next request times
+out. That response then arrives late, and every response after it answers the
+request before it -- a desync that outlives the pairing and gets diagnosed as
+anything but this. It cost a day.
+
+Returns T when both keys have arrived."
+  (loop for pdu = (smp-next (smp-session-conn session) :timeout-ms 0)
+        while pdu
+        do (%absorb-key-pdu session pdu))
+  (smp-keys-complete-p session))
+
 (defun smp-receive-keys (session &key (timeout-ms 10000))
   "Collect the keys the peer distributes after encryption.
 
 Returns the session, with PEER-IRK and PEER-IDENTITY-ADDR filled in if the
 peer sent them. A peer that distributes nothing is not an error: it simply
-cannot be recognised later under a new address."
+cannot be recognised later under a new address.
+
+This blocks. Anything that is also serving -- a peripheral, say -- wants
+SMP-POLL-KEYS across its own loop instead."
   (let ((conn (smp-session-conn session))
         (deadline (+ (get-internal-real-time)
                      (round (* timeout-ms internal-time-units-per-second) 1000))))
     (loop
-      (when (and (smp-session-peer-irk session)
-                 (smp-session-peer-identity-addr session))
-        (return session))
+      (when (smp-keys-complete-p session) (return session))
       (when (<= (- deadline (get-internal-real-time)) 0) (return session))
-      (let ((pdu (smp-next conn :timeout-ms 500)))
-        (when (and pdu (vectorp pdu) (plusp (length pdu)))
-          (let ((op (aref pdu 0)))
-            (cond
-              ((and (= op +smp-identity-information+) (>= (length pdu) 17))
-               (setf (smp-session-peer-irk session) (msb (subseq pdu 1 17)))
-               (%trace-value "peer IRK" (smp-session-peer-irk session)))
-              ((and (= op +smp-identity-address-information+) (>= (length pdu) 8))
-               (setf (smp-session-peer-identity-addr-type session)
-                     (if (= 1 (aref pdu 1)) :random :public)
-                     (smp-session-peer-identity-addr session) (subseq pdu 2 8))
-               (%trace-value "peer identity"
-                             (smp-session-peer-identity-addr session))))))))))
+      (%absorb-key-pdu session (smp-next conn :timeout-ms 500)))))
