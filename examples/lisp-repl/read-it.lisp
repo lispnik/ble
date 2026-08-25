@@ -15,7 +15,7 @@
 ;;;; halves as complete.
 (defpackage #:lisp-repl-client
   (:use #:common-lisp)
-  (:export #:run #:eval-remote))
+  (:export #:run #:eval-remote #:demo #:*demo-script*))
 (in-package #:lisp-repl-client)
 
 (defun eval-remote (nus text &key (timeout-ms 30000))
@@ -66,7 +66,61 @@ it for anything that must not be run twice."
         (force-output)
         nil))))
 
-(defun run (mac &key (dev 2) (addr-type :random) (forms nil) (interactive t))
+(defparameter *demo-script*
+  '(("(machine-instance)"
+     "Where am I? Evaluated on the Pi, over the air.")
+    ("(list (lisp-implementation-type) (lisp-implementation-version))"
+     "And what is running there.")
+    ("(with-open-file (s \"/sys/class/thermal/thermal_zone0/temp\") (/ (read s) 1000.0))"
+     "A real sensor reading -- no characteristic was defined for this, and
+      none had to be.")
+    ("(defun celsius->f (c) (+ 32 (* 9/5 c)))"
+     "Now change the running image. This function did not exist a moment ago.")
+    ("(celsius->f 21)"
+     "...and call it. The device learned a new capability mid-conversation,
+      which is the difference between a REPL and a protocol.")
+    ("(in-package :ble)"
+     "Move into the library's own package.")
+    ("(mapcar (lambda (a) (list (hci-adapter-index a) (hci-adapter-bus a)))
+              (list-hci-adapters))"
+     "Ask the Bluetooth stack, over Bluetooth, what radios it has.")
+    ("(hci-socket-acl-credits (hci-conn-sock lisp-repl:*connection*))"
+     "Now the self-referential part: the flow-control window of the very link
+      this answer is travelling on.")
+    ("(hci-read-rssi lisp-repl:*connection*)"
+     "And its signal strength, in dBm. The device is telling us how well it
+      can hear us, using the link it is telling us over.")
+    ("(/ 1 0)"
+     "Errors come back as values rather than taking the device down.")
+    ("#.(+ 1 2)"
+     "And the reader is not a back door: #. is refused, not computed."))
+  "What DEMO runs, as (FORM . NARRATION) pairs.
+
+Chosen to build an argument rather than to list features: where am I, what
+can I see, now change me, now ask me about myself.")
+
+(defun demo (mac &key (dev 2) (addr-type :random))
+  "Run the demo script against the REPL at MAC, narrating as it goes."
+  (run mac :dev dev :addr-type addr-type :interactive nil
+           :script *demo-script*))
+
+(defun one-line (text)
+  "Collapse a source-wrapped string onto one line.
+
+The script is written to be readable in the file, so its strings carry the
+indentation of the file rather than of the output."
+  (let ((out (make-string-output-stream)) (spacing nil))
+    (loop for c across text
+          do (if (member c '(#\Space #\Newline #\Tab))
+                 (setf spacing t)
+                 (progn (when (and spacing (plusp (file-position out)))
+                          (write-char #\Space out))
+                        (setf spacing nil)
+                        (write-char c out))))
+    (get-output-stream-string out)))
+
+(defun run (mac &key (dev 2) (addr-type :random) (forms nil) (script nil)
+                     (interactive t))
   "Connect to the REPL at MAC and evaluate FORMS, then read from the terminal.
 
 FORMS is a list of strings, sent in order -- useful for a scripted session or
@@ -97,6 +151,17 @@ ends it."
       (multiple-value-bind (reply how) (eval-remote nus text)
         (format t "~A~@[  [~(~A~)]~]~%" reply (unless (eq how :ok) how))
         (force-output)))
+    (loop for (text narration) in script
+          for n from 1
+          do (format t "~&~%~D. ~A~%" n (one-line narration))
+             (format t "~&   ~A~%" (one-line text))
+             (force-output)
+             (multiple-value-bind (reply how) (eval-remote nus text)
+               (format t "~&   => ~A~@[  [~(~A~)]~]~%"
+                       (string-trim '(#\Newline) reply)
+                       (unless (eq how :ok) how))
+               (force-output)
+               (when (eq how :disconnected) (return))))
     (when interactive
       (format t "~&~%Remote REPL. Blank line or :quit to leave.~%")
       (loop

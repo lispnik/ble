@@ -196,6 +196,8 @@ make examples        # build them, and check every database
 (nordic-uart:run :dev 1)                         ; a serial port over BLE
 (broadcaster:run :dev 1 :phy :coded)             ; a long-range beacon
 (provisioning:run :dev 1)                        ; take a configuration
+(lisp-repl:run :dev 1)                           ; a REPL, over the air
+(lisp-repl-client:demo "C7:06:A2:90:43:53")      ; ...and a narrated tour of it
 ```
 
 ```lisp

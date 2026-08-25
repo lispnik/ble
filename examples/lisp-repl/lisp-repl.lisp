@@ -34,11 +34,22 @@
 (defpackage #:lisp-repl
   (:use #:common-lisp)
   (:export #:eval-string #:complete-form-p #:build-server #:run
-           #:*name* #:*repl-package* #:+end-of-reply+))
+           #:*name* #:*repl-package* #:+end-of-reply+
+           #:*connection* #:*peer*))
 
 (in-package #:lisp-repl)
 
 (defparameter *name* "Lisp REPL")
+
+(defvar *connection* nil
+  "The live HCI connection carrying this session, while one is up.
+
+Bound so that evaluated code can ask about the link it is arriving over.
+That is the thing a REPL can do and a fixed protocol cannot: a glucose
+service answers questions somebody anticipated, and this answers the ones
+nobody did -- including questions about itself.")
+
+(defvar *peer* nil "The connected peer's address, on-air order.")
 
 (defparameter *repl-package* (find-package :cl-user)
   "Where forms are read and evaluated. A session may change it, and the change
@@ -224,14 +235,15 @@ default, the peer must pair before it can write anything."
          :pairing pairing
          :tick-ms 10
          :on-connect (lambda (conn peer ptype)
-                       (declare (ignore conn))
                        (setf (session-input s) "" (session-output s) nil
-                             (session-package s) (find-package :cl-user))
+                             (session-package s) (find-package :cl-user)
+                             *connection* conn *peer* peer)
                        (format t "~&connected: ~A (~(~A~))~%"
                                (ble:format-mac peer) ptype)
                        (force-output))
          :on-disconnect (lambda (conn)
                           (declare (ignore conn))
+                          (setf *connection* nil *peer* nil)
                           (format t "~&disconnected after ~D form(s)~%"
                                   (session-forms s))
                           (force-output))
