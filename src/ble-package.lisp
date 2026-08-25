@@ -42,6 +42,11 @@
           hci-socket-fd
           hci-socket-dev
           hci-socket-acl-len
+          ;; The outbound flow-control window, so a consumer can see
+          ;; backpressure rather than only feel it.
+          hci-socket-acl-credits
+          hci-socket-acl-max-credits
+          *acl-credit-timeout-ms*
           send-hci-command
           *hci-command-timeout-ms*
           hci-command-error

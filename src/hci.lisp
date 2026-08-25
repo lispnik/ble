@@ -84,7 +84,26 @@ they are put back here and READ-HCI-PACKET hands them out before reading the
 socket again. Without it, checking a command status would quietly eat another
 reader's packets, which is a bug this library has already had six times in
 other guises."
-  fd dev acl-len (pending nil))
+  fd dev acl-len (pending nil)
+  ;; The controller's outbound ACL flow-control window. ACL-CREDITS is how
+  ;; many data packets may still be handed over before waiting; the
+  ;; controller returns them in HCI_Number_Of_Completed_Packets as the radio
+  ;; drains its buffers.
+  ;;
+  ;; This is not an optimisation. A controller advertises a handful of
+  ;; buffers -- six, on the dongles this was written against -- and a host
+  ;; loop can submit tens of thousands of packets a second. Without the
+  ;; window the surplus does not wait anywhere polite: it queues as pending
+  ;; USB transfers, each holding a swiotlb bounce-buffer slot, until that
+  ;; pool is exhausted machine-wide. Observed consequence, twice: the
+  ;; Bluetooth URBs start failing with EAGAIN and the SDIO Wi-Fi driver --
+  ;; which needs bounce buffers from the same pool -- blocks forever, taking
+  ;; the host's network down with it. The library could wedge the machine it
+  ;; was running on, and did.
+  ;;
+  ;; NIL means the count was never learned, in which case sending does not
+  ;; wait -- the old behaviour, kept only for a controller that does not say.
+  (acl-credits nil) (acl-max-credits nil))
 
 (defun %hci-filter-bytes ()
   "The 16-octet struct hci_filter that lets every event packet through.

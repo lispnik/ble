@@ -691,6 +691,37 @@ tests through it immediately found a walk that never terminated when a peer
 repeated itself, and an indication path that had been reported as implemented
 while half of the edit had silently failed to apply.
 
+## Flow control, and how the library used to wedge its host
+
+A controller has a small number of buffers for outbound data — on the dongles
+this was written against, **eight packets of 27 octets**. It reports that count
+in `LE Read Buffer Size`, spends one per ACL packet, and hands them back in
+`HCI_Number_Of_Completed_Packets` as the radio drains them. That window is the
+only thing making a host wait for a radio three orders of magnitude slower
+than it.
+
+This library read the packet *length* from that response and discarded the
+*count*, and never read the returning event at all. So `hci-acl-send-l2cap`
+just wrote, forever. Under sustained sending the surplus queued as pending USB
+transfers, each holding a swiotlb bounce-buffer slot, until that **machine-wide**
+pool was exhausted — at which point Bluetooth URBs failed with `EAGAIN` and the
+SDIO Wi-Fi driver, needing buffers from the same pool, blocked forever and took
+the host's network down with it. Twice.
+
+It now keeps the credit window. Sending blocks when it is empty, pumping while
+it waits, because the event that refunds a credit arrives on the transport
+being pumped. `tools/nus-throughput/` is what found this, and measures what is
+left once the sender is made to wait:
+
+| direction | rate | packets |
+|---|---|---|
+| central → peripheral (Write Command) | 35.1 kbit/s | 18/s of 244 octets |
+| peripheral → central (notifications) | 26.4 kbit/s | 14/s |
+
+Zero backpressure stalls, and both ends' byte counts agree. Those numbers are
+bounded by the connection interval and the 27-octet ACL fragment, not by the
+PHY — this stack requests neither a faster interval nor Data Length Extension.
+
 ## Commands the controller refused
 
 `send-hci-command` waits for the Command Complete or Command Status and

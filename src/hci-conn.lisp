@@ -99,7 +99,9 @@ HCI-SOCKET. Hand it back with CLOSE-HCI-USER-SOCKET."
                   (cffi:mem-aref sa :unsigned-char 4) +hci-channel-user+)
             (check-syscall (%bind fd sa 6) "bind(HCI_CHANNEL_USER)"))
           (let ((sock (make-hci-socket :fd fd :dev dev)))
-            ;; Returns (values SOCK LE-ACL-DATA-PACKET-LENGTH).
+            ;; Returns (values SOCK LE-ACL-DATA-PACKET-LENGTH). The init
+            ;; also learns the controller's outbound buffer count and stores
+            ;; it on SOCK as the ACL credit window.
             (let ((acl-len (hci-init-controller sock)))
               (setf (hci-socket-acl-len sock) acl-len)
               (values sock acl-len))))
@@ -152,8 +154,17 @@ and learn the LE ACL buffer size. Returns the LE ACL data packet length."
                   (make-array 8 :initial-element #xFF) :name "LE Set Event Mask")
   (let* ((rsp (hci-do-command sock +ogf-le+ +ocf-le-read-buffer-size+ #()
                               :name "LE Read Buffer Size"))
-         (le-acl-len (if (>= (length rsp) 2) (u16-le rsp 0) 0)))
-    (if (plusp le-acl-len) le-acl-len +acl-default-len+)))
+         (le-acl-len (if (>= (length rsp) 2) (u16-le rsp 0) 0))
+         ;; The third octet is Total_Num_LE_ACL_Data_Packets: how many
+         ;; outbound buffers the controller has. It was read and thrown away
+         ;; for a long time, which is the whole of the flow-control bug -- the
+         ;; library asked the controller how much it could take and ignored
+         ;; the answer.
+         (le-acl-count (if (>= (length rsp) 3) (aref rsp 2) 0)))
+    (setf (hci-socket-acl-credits sock) (and (plusp le-acl-count) le-acl-count)
+          (hci-socket-acl-max-credits sock) (and (plusp le-acl-count) le-acl-count))
+    (values (if (plusp le-acl-len) le-acl-len +acl-default-len+)
+            le-acl-count)))
 
 ;;; --- LE connection -----------------------------------------------------
 
@@ -322,6 +333,53 @@ attempt between tries."
 
 ;;; --- ACL / L2CAP transport (ATT lives on CID 0x0004) -------------------
 
+(defparameter *acl-credit-timeout-ms* 5000
+  "How long to wait for the controller to return an ACL credit before giving
+up. A controller that has not freed a buffer in this long is not going to.")
+
+(defun %refund-acl-credits (sock pkt)
+  "Take the credits back out of an HCI_Number_Of_Completed_Packets event.
+
+The event carries a count per connection handle. The credits are pooled in
+the controller rather than per connection, so they are pooled here too and
+the handles are only used to know how many to add back."
+  (when (and (hci-socket-acl-credits sock) (>= (length pkt) 4))
+    (let ((handles (aref pkt 3)))
+      (loop for i from 0 below handles
+            for base = (+ 4 (* 4 i))
+            while (<= (+ base 4) (length pkt))
+            do (incf (hci-socket-acl-credits sock) (u16-le pkt (+ base 2))))
+      ;; Never more than the controller said it had. A miscount that inflated
+      ;; the window would put the overrun straight back.
+      (when (hci-socket-acl-max-credits sock)
+        (setf (hci-socket-acl-credits sock)
+              (min (hci-socket-acl-credits sock)
+                   (hci-socket-acl-max-credits sock)))))))
+
+(defun %spend-acl-credit (conn)
+  "Wait for an outbound buffer, then claim it.
+
+Pumping while waiting rather than sleeping, because the event that returns
+the credit arrives on the transport being pumped -- and because HCI-PUMP is
+the only thing allowed to read the socket, so waiting any other way would be
+a second reader."
+  (let ((sock (hci-conn-sock conn)))
+    ;; NIL credits means the controller never told us; send as before.
+    (when (hci-socket-acl-credits sock)
+      (let ((deadline (+ (get-internal-real-time)
+                         (round (* *acl-credit-timeout-ms*
+                                   internal-time-units-per-second)
+                                1000))))
+        (loop while (<= (hci-socket-acl-credits sock) 0)
+              do (when (> (get-internal-real-time) deadline)
+                   (error "no ACL credit returned in ~Dms; the controller has ~
+                           ~D buffer(s) and none came back"
+                          *acl-credit-timeout-ms*
+                          (hci-socket-acl-max-credits sock)))
+                 (when (eq :disconnected (hci-pump conn 20))
+                   (return)))
+        (decf (hci-socket-acl-credits sock))))))
+
 (defun hci-acl-send-l2cap (conn cid pdu)
   "Wrap PDU in an L2CAP B-frame on CID and send it as one or more HCI ACL data
 packets. ATT is one channel among several -- the signalling channel carries
@@ -346,7 +404,8 @@ connection parameter requests on CID 0x0005 -- so the framing is shared."
                       (u16le-put a 3 (length seg))
                       (replace a seg :start1 5)
                       a)
-          do (hci-write-raw (hci-conn-sock conn) acl)
+          do (%spend-acl-credit conn)
+             (hci-write-raw (hci-conn-sock conn) acl)
              (setf off end)
           while (< off total))))
 
@@ -445,6 +504,12 @@ through here, so a sixth is harder to write than to avoid."
     (cond
       ((null pkt) nil)
       ((and (>= (length pkt) 2) (= (aref pkt 0) #x04))    ; HCI event
+       ;; Credits first, and regardless of what else this event is for. It is
+       ;; the only thing that lets a sender continue, and a sender blocked on
+       ;; it is inside this very call -- so filing it without acting on it
+       ;; would deadlock the send that is pumping to receive it.
+       (when (= (aref pkt 1) +hci-num-completed-evt+)
+         (%refund-acl-credits (hci-conn-sock conn) pkt))
        (if (= (aref pkt 1) +hci-disconn-complete-evt+)
            :disconnected
            (progn
