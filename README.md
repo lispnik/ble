@@ -152,6 +152,17 @@ limits: 31 octets of payload (it sends 42, including the full NUS UUID that
 the UART example cannot fit) and 1M-only (it can advertise on the **Coded
 PHY**). `examples/scanner/` is the other half and hears both.
 
+`examples/provisioning/` is about **long writes**. Every other example sends
+values that fit one ATT payload, because that is what a measurement is; a
+configuration is not — an SSID is up to 32 octets, a WPA passphrase up to 63,
+and a server URL beside them. So it travels as a queued write: Prepare Write
+puts fragments in a queue and Execute Write commits them. The point of the
+example is that Execute Write can also **cancel**, discarding the queue
+untouched, because a queued write is one write that arrives in pieces rather
+than several writes — a peer that disconnects halfway through configuring a
+device must not leave it holding half a new SSID and all of an old passphrase.
+Reading it back is the same problem mirrored, through Read Blob.
+
 That is why they are a system rather than loose scripts. Loading a file by
 hand can succeed for the wrong reason, since the reader picks up whatever
 package happens to be current; loading the system fails the way it would fail
@@ -184,6 +195,7 @@ make examples        # build them, and check every database
 (object-transfer:run :dev 1)                     ; serve objects over L2CAP
 (nordic-uart:run :dev 1)                         ; a serial port over BLE
 (broadcaster:run :dev 1 :phy :coded)             ; a long-range beacon
+(provisioning:run :dev 1)                        ; take a configuration
 ```
 
 ```lisp
