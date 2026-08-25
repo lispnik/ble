@@ -19,13 +19,14 @@
 
 ;;; NUS characteristic UUIDs in ATT wire order (128-bit, little-endian).
 ;;; 6E400002-B5A3-F393-E0A9-E50E24DCCA9E reversed, etc. Only byte 12 differs.
+(defparameter +nus-service-uuid-le+
+  (uuid128 "6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
+  "The Nordic UART Service UUID, ATT wire order.")
 (defparameter +nus-rx-uuid-le+
-  (coerce-octets #(#x9E #xCA #xDC #x24 #x0E #xE5 #xA9 #xE0
-                   #x93 #xF3 #xA3 #xB5 #x02 #x00 #x40 #x6E))
+  (uuid128 "6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
   "NUS RX (host -> device) characteristic UUID, ATT wire order.")
 (defparameter +nus-tx-uuid-le+
-  (coerce-octets #(#x9E #xCA #xDC #x24 #x0E #xE5 #xA9 #xE0
-                   #x93 #xF3 #xA3 #xB5 #x03 #x00 #x40 #x6E))
+  (uuid128 "6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
   "NUS TX (device -> host) characteristic UUID, ATT wire order.")
 
 ;;; --- NUS connection ----------------------------------------------------

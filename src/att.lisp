@@ -624,6 +624,28 @@ is most of them -- do not have to have one."
     (u16le-put v 0 value)
     v))
 
+(defun uuid128 (string)
+  "The ATT wire form of a 128-bit UUID written the way people write them:
+\"6E400001-B5A3-F393-E0A9-E50E24DCCA9E\".
+
+The inverse of UUID-STRING, and the reason it exists is that the wire form is
+the reverse of the written one. Every vendor profile publishes its UUIDs in
+the dashed big-endian form, every ATT PDU carries them little-endian, and a
+hand-reversed sixteen-octet literal is both unreadable and unreviewable --
+nobody can tell a transposition from a decision by looking at it.
+
+Accepts the dashed form or bare hex."
+  (let* ((hex (remove #\- string))
+         (n (length hex)))
+    (unless (= n 32)
+      (error "uuid128: ~S has ~D hex digit(s), not 32" string n))
+    (let ((v (make-octets 16)))
+      ;; Big-endian in, little-endian out: the last written octet is the first
+      ;; on the wire.
+      (dotimes (i 16 v)
+        (setf (aref v (- 15 i))
+              (parse-integer hex :start (* 2 i) :end (+ 2 (* 2 i)) :radix 16))))))
+
 (defun uuid-string (uuid)
   "Render an ATT-order UUID for humans: \"FFE1\", or the dashed 128-bit form."
   (let ((be (reverse (coerce uuid 'list))))

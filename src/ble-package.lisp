@@ -100,6 +100,10 @@
           ;; GATT: UUIDs, characteristics, ATT operations
           uuid16
           uuid-string
+          ;; The written form is the reverse of the wire form, so a
+          ;; hand-reversed literal is unreviewable. Anyone defining a
+          ;; vendor service needs this.
+          uuid128
           gatt-char
           ;; The constructor as well as the accessors: a consumer
           ;; testing its own client code needs to build one without
@@ -164,6 +168,9 @@
           nus-close
           nus-send
           nus-recv
+          +nus-service-uuid-le+
+          +nus-rx-uuid-le+
+          +nus-tx-uuid-le+
           nus
           nus-p
           nus-fd
