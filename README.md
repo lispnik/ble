@@ -6,6 +6,85 @@ A Bluetooth Low Energy library for SBCL on Linux: HCI sockets, adapter
 enumeration, LE scanning, extended advertising, and an ATT/GATT client that
 speaks over either of two transports.
 
+## Trippy Demo
+
+`examples/lisp-repl/` is a Common Lisp REPL reachable over Bluetooth, and
+`(lisp-repl-client:demo "AA:BB:...")` runs a scripted tour of it. What follows
+is a real transcript between two USB dongles on a Raspberry Pi 4, not a
+mock-up — the addresses, temperatures and signal strengths are whatever they
+were at the time.
+
+```
+connected to F0:FA:AD:BE:D0:25
+paired; encryption -> T
+NUS attached, MTU 247
+
+1. Where am I? Evaluated on the Pi, over the air.
+   (machine-instance)
+   => "rpi4"
+
+2. And what is running there.
+   (list (lisp-implementation-type) (lisp-implementation-version))
+   => ("SBCL" "2.5.2.debian")
+
+3. A real sensor reading -- no characteristic was defined for this, and none had to be.
+   (with-open-file (s "/sys/class/thermal/thermal_zone0/temp") (/ (read s) 1000.0))
+   => 57.452
+
+4. Now change the running image. This function did not exist a moment ago.
+   (defun celsius->f (c) (+ 32 (* 9/5 c)))
+   => CELSIUS->F
+
+5. ...and call it. The device learned a new capability mid-conversation, which is the difference between a REPL and a protocol.
+   (celsius->f 21)
+   => 349/5
+
+6. Move into the library's own package.
+   (in-package :ble)
+   => #<PACKAGE "BLE">
+
+7. Ask the Bluetooth stack, over Bluetooth, what radios it has.
+   (mapcar (lambda (a) (list (hci-adapter-index a) (hci-adapter-bus a))) (list-hci-adapters))
+   => ((0 :SERIAL) (5 :USB) (6 :USB))
+
+8. Now the self-referential part: the flow-control window of the very link this answer is travelling on.
+   (hci-socket-acl-credits (hci-conn-sock lisp-repl:*connection*))
+   => 8
+
+9. And its signal strength, in dBm. The device is telling us how well it can hear us, using the link it is telling us over.
+   (hci-read-rssi lisp-repl:*connection*)
+   => -19
+
+10. Errors come back as values rather than taking the device down.
+   (/ 1 0)
+   => ; DIVISION-BY-ZERO: arithmetic error DIVISION-BY-ZERO signalled
+Operation was (/ 1 0).
+
+11. And the reader is not a back door: #. is refused, not computed.
+   #.(+ 1 2)
+   => ; SIMPLE-READER-ERROR: can't read #. while *READ-EVAL* is NIL
+
+                         Stream: #<dynamic-extent STRING-INPUT-STREAM (unavailable) from "#.(+ 1 2)">
+```
+
+Steps 4 and 5 are the ones worth pausing on: the device gained a capability
+*mid-conversation*. Nothing in a GATT database can do that — a profile only
+answers questions somebody anticipated when they wrote it.
+
+Steps 8 and 9 are the reason `lisp-repl:*connection*` exists. It is bound to
+the live connection while a session is up, so evaluated code can interrogate
+the link it is arriving over: step 8 reports the ACL flow-control window of
+that link, and step 9 asks the device how well it can hear you — answering
+over the very link it is reporting on.
+
+Step 5 returning `349/5` rather than `69.8` is not a rounding failure. It is
+exact rational arithmetic surviving a round trip that a byte-oriented protocol
+would have flattened to a float.
+
+And it is encrypted: the REPL's characteristics require a paired link by
+default, because an unauthenticated remote evaluator is precisely a remote
+shell. `#.` is refused at read time for the same reason — see step 11.
+
 ## Systems
 
 | System | Depends on | Contents |
