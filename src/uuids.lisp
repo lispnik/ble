@@ -16,6 +16,15 @@
 ;;;
 ;;; ble/core, because they are just numbers -- a consumer parsing a capture
 ;;; file needs them as much as one driving a radio does.
+;;;
+;;; Every number here is checked against the SIG's own machine-readable
+;;; registry by tools/check-uuids/check-uuids.py, which is worth having
+;;; because a wrong one is invisible: a peripheral with a mistyped service
+;;; UUID advertises correctly, connects correctly, and is simply never
+;;; recognised by the app looking for it. Nothing caught that before the
+;;; script existed. What it cannot check is anything defined in the GATT
+;;; Specification Supplement rather than Assigned Numbers -- the Environmental
+;;; Sensing application codes, for one -- because that is published as a PDF.
 
 ;;; --- services -----------------------------------------------------------
 
@@ -58,6 +67,10 @@
 (defconstant +char-object-properties+              #x2AC4)
 (defconstant +char-object-action-control-point+    #x2AC5)
 (defconstant +char-object-list-control-point+      #x2AC6)
+;; Object types. What kind of thing an object is, as a UUID in its own
+;; registry rather than the characteristic one.
+(defconstant +object-type-unspecified+             #x2ACA)
+(defconstant +object-type-directory-listing+       #x2ACB)
 ;; Environmental Sensing. Any of these may appear more than once in one
 ;; service -- three Temperatures for indoor, outdoor and a probe is the
 ;; ordinary case -- so a client cannot look them up by UUID and stop.

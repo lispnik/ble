@@ -65,6 +65,15 @@ jobs:
       # ble/examples is a system so that this can fail loudly. Loading a file
       # by hand can succeed for the wrong reason -- the reader picks up
       # whatever package is current -- while the system fails for a consumer.
+      # The assigned numbers in src/uuids.lisp are not ours, and a wrong one
+      # is invisible -- a peripheral with a mistyped service UUID advertises
+      # and connects correctly and is simply never recognised. This checks
+      # them against the SIG's own machine-readable registry. It exits 0 when
+      # the registry is unreachable, so a network problem is not a build
+      # failure.
+      - name: Check the assigned numbers against the Bluetooth SIG
+        run: python3 tools/check-uuids/check-uuids.py src/uuids.lisp
+
       - name: Build the examples
         run: make examples
 

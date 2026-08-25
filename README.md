@@ -620,6 +620,25 @@ Adjust the adapter indices and the peer address at the top of each file;
 rather than assuming. Each side hands its adapter back on every exit path,
 including errors — a process killed outright leaves one down.
 
+## The assigned numbers
+
+`src/uuids.lisp` holds numbers that are not ours — the SIG publishes them, and
+a peripheral that wants to be recognised must use exactly them. A wrong one is
+invisible: the device advertises correctly, connects correctly, and is simply
+never recognised by the app looking for it.
+
+```sh
+python3 tools/check-uuids/check-uuids.py src/uuids.lisp
+```
+
+checks every constant against the SIG's own machine-readable Assigned Numbers
+at `bitbucket.org/bluetooth-SIG/public`, which is the registry rather than
+somebody's copy of it, and runs in CI. What it cannot check is anything
+defined in the GATT Specification Supplement instead — the Environmental
+Sensing application codes, for one — because that is published only as a PDF.
+That is why `examples/environmental-sensing/` sends Unspecified rather than a
+guessed placement code.
+
 ## Testing against it, without a radio
 
 `make-att-test-channel` is a third kind of ATT channel, alongside the kernel

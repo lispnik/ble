@@ -33,11 +33,12 @@
 
 (defparameter *name* "Lisp Objects")
 
-;;; The LE PSM the channel is opened to. The SIG assigns one to Object
-;;; Transfer; both halves of this example agree on this value, so the example
-;;; works whatever it is, but check it against Assigned Numbers before
-;;; pointing somebody else's OTS client at this server -- a wrong PSM is
-;;; refused as `SPSM not supported', which at least fails loudly.
+;;; The LE PSM the channel is opened to. This is the SIG's assigned number
+;;; for Object Transfer, verified against the registry rather than remembered
+;;; -- tools/check-uuids/check-uuids.py re-checks it. A wrong PSM would be
+;;; refused as `SPSM not supported', which at least fails loudly, but it would
+;;; fail against every real OTS client and pass against this example, since
+;;; both halves of it read the same constant.
 (defconstant +ots-psm+ #x0025)
 
 ;;; --- what the profile defines -------------------------------------------
@@ -151,13 +152,14 @@ refused with Channel Unavailable."
   oacp-handle oacp-cccd olcp-handle olcp-cccd
   (pending nil) (outstanding nil))
 
-(defun add-object (state name content &key (type #xFFFF)
+(defun add-object (state name content &key (type ble:+object-type-unspecified+)
                                            (properties +prop-read+))
   "Add one object to the list. CONTENT is an octet vector or a string.
 
-TYPE is a UUID naming what kind of thing this is. The SIG defines type UUIDs
-for some standard kinds; this example carries its own rather than printing a
-number it has not checked, which would be a confident claim about a format."
+TYPE is a UUID naming what kind of thing this is, from the SIG's object-type
+registry -- a separate table from the characteristic UUIDs, which is why it
+can hold 0x2ACA without colliding with anything. Unspecified is the honest
+default for a server whose objects are whatever somebody put in them."
   (let* ((content (if (stringp content)
                       (map '(simple-array (unsigned-byte 8) (*)) #'char-code content)
                       (coerce content '(simple-array (unsigned-byte 8) (*)))))
@@ -368,7 +370,7 @@ void."
                                :value ""))
           (type-handle (ble:gatt-add-characteristic
                         server :uuid ble:+char-object-type+ :properties '(:read)
-                               :value (ble:uuid16 #xFFFF)))
+                               :value (ble:uuid16 ble:+object-type-unspecified+)))
           (size-handle (ble:gatt-add-characteristic
                         server :uuid ble:+char-object-size+ :properties '(:read)
                                :value (object-size-value 0 0)))

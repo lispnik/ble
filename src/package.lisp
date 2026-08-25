@@ -80,6 +80,8 @@
    #:+char-object-properties+
    #:+char-object-action-control-point+
    #:+char-object-list-control-point+
+   #:+object-type-unspecified+
+   #:+object-type-directory-listing+
    #:+char-temperature+
    #:+char-humidity+
    #:+char-pressure+
