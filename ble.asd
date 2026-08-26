@@ -18,7 +18,7 @@
 (asdf:defsystem #:ble/core
   :description "Portable BLE primitives: octets, advertising-data records, MAC byte order."
   :license     "MIT"
-  :version     "0.2.0"
+  :version     "0.3.0"
   :depends-on  ()
   :components ((:module "src"
                 :components ((:file "package")
@@ -31,7 +31,7 @@
 (asdf:defsystem #:ble
   :description "Generic Bluetooth Low Energy over raw BlueZ sockets (Linux only)."
   :license     "MIT"
-  :version     "0.2.0"
+  :version     "0.3.0"
   ;; ironclad is for the Security Manager: AES-CMAC, and P-256 in software
   ;; because the controllers here answer LE Generate DHKey with garbage.
   ;; ble/core stays dependency-free, which is what keeps consumers' protocol
@@ -74,7 +74,7 @@
 (asdf:defsystem #:ble/examples
   :description "Worked examples: peripherals and clients built on ble."
   :license     "MIT"
-  :version     "0.2.0"
+  :version     "0.3.0"
   :depends-on  (#:ble)
   ;; Each example lives in its own package and uses only exported symbols.
   ;; That is the point of them being a system rather than loose scripts: if an

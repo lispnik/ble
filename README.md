@@ -733,11 +733,13 @@ box to run on, which is the trade being made rather than a gap to close.
 Not implemented:
 
 - **LE privacy** (resolving list, RPA) and the controller filter-accept-list.
-- **Signed Writes.** Verifying one needs a CSRK, which is distributed by
-  bonding, which needs SMP. Until that exists the only honest thing to do with
-  a signed write is ignore it — and since it is a command, silence is also the
-  protocol-correct way to not support it. Accepting one unverified would be
-  worse than refusing.
+- **Signed Writes.** Verifying one needs a CSRK, and the reason has moved:
+  SMP is here and bonding works, but key distribution asks only for the
+  identity key (`+smp-key-dist-idkey+`), never the signing key, so no CSRK is
+  ever exchanged. What is left is requesting it, storing it with the bond, and
+  the CMAC verification — not a missing subsystem. Until then a signed write
+  is ignored, which for a command is also the protocol-correct way to not
+  support it. Accepting one unverified would be worse than refusing.
 
 **One reader.** `hci-pump` is the only thing that reads from a connection's
 socket. It routes and never consumes: ATT PDUs are filed in the connection's
@@ -755,9 +757,15 @@ ATT PDU as a notification and lost an in-flight response; the signalling
 server consumed a response another caller was blocked on. Each surfaced as an
 unrelated timeout elsewhere, and four of the five were invisible to the suite.
 
-**Two transports, one ATT layer** (`src/att.lisp`). `att-send` and `att-recv` dispatch on
-whether the channel is an integer fd (a kernel L2CAP socket) or an `hci-conn`,
-so every line of ATT protocol is shared:
+**Four channels, one ATT layer** (`src/att.lisp`). `att-send` and `att-recv`
+dispatch on what the channel is — an integer fd (a kernel L2CAP socket), an
+`hci-conn` (the fixed CID `0x0004` over a user-channel link), an
+`eatt-bearer` (an Enhanced ATT bearer, where one PDU is one credit-based
+SDU), or an `att-test-channel` (a scripted peer, no radio at all). Every line
+of ATT protocol above that is shared, which is why adding bearers cost one
+`cond` clause rather than a second implementation.
+
+The two that connect to something:
 
 - `l2cap-att-connect` — ask the kernel to connect. Less invasive, needs no
   `CAP_NET_ADMIN`, leaves the adapter with the kernel.
