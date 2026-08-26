@@ -8,6 +8,13 @@ speaks over either of two transports.
 
 ## Trippy Demo 🍄
 
+`examples/nus-pty/` is the practical one: it bridges a Nordic UART peripheral
+to a pseudo-terminal, so a BLE device appears as `/dev/pts/N` and `screen`,
+`minicom` or a shell script can drive it with no idea a radio is involved.
+That is the honest answer to wanting the Serial Port Profile — SPP is a BR/EDR
+protocol this library does not speak, and this delivers what SPP is wanted
+*for*. Verified by talking to a peripheral with nothing but `printf` and `dd`.
+
 `examples/lisp-repl/` is a Common Lisp REPL reachable over Bluetooth, and
 `(lisp-repl-client:demo "AA:BB:...")` runs a scripted tour of it. What follows
 is a real transcript between two USB dongles on a Raspberry Pi 4, not a

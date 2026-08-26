@@ -52,6 +52,7 @@ examples:
 	$(SBCL) $(SBCL_FLAGS) --load examples/broadcaster/compile-check.lisp
 	$(SBCL) $(SBCL_FLAGS) --load examples/provisioning/compile-check.lisp
 	$(SBCL) $(SBCL_FLAGS) --load examples/lisp-repl/compile-check.lisp
+	$(SBCL) $(SBCL_FLAGS) --load examples/nus-pty/compile-check.lisp
 
 # Copy the tree, then DROP THE REMOTE FASL CACHE.
 #

@@ -104,7 +104,9 @@
                                            (:file "read-it")))
                              (:module "lisp-repl"
                               :components ((:file "lisp-repl")
-                                           (:file "read-it")))))))
+                                           (:file "read-it")))
+                             (:module "nus-pty"
+                              :components ((:file "nus-pty")))))))
 
 (asdf:defsystem #:ble/io-tests
   :description "Tests for the parts of the I/O layer that need no radio."
