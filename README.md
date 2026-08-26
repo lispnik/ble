@@ -429,8 +429,9 @@ notifies — and hands back the handles it assigned rather than making you
 derive them.
 
 It answers Exchange MTU, Find Information, Find By Type Value, Read By Type,
-Read By Group Type, Read, Read Blob, Read Multiple, Write, Write Command, and
-Prepare/Execute Write, and refuses anything else with `request not supported`.
+Read By Group Type, Read, Read Blob, Read Multiple, Read Multiple Variable
+Length, Write, Write Command, and Prepare/Execute Write, and refuses anything
+else with `request not supported`.
 
 Long writes go through the prepare queue, so nothing takes effect until the
 Execute: a client that gives up midway leaves the attribute exactly as it was,
@@ -704,11 +705,18 @@ and they opt in per dynamic extent:
 notification will ever arrive, so a caller that carried on would wait out its
 timeouts against a peer that was never going to speak.
 
-Long and batched access: `att-read-long-value` and `att-read-multiple`,
+Long and batched access: `att-read-long-value`, `att-read-multiple` and
+`att-read-multiple-variable`,
 `att-prepare-write` / `att-execute-write`, and `att-write-long-value` for a
 value larger than MTU−3. Sized by `att-mtu` — the MTU *agreed* with the peer,
 which is not the same number as `*att-rx-mtu*`, what we advertise we can
-receive. They differ whenever the peer offers less, and sizing by the wrong
+receive. Prefer `att-read-multiple-variable` over `att-read-multiple` where
+the peer supports it: the older opcode returns the values concatenated with
+nothing between them, so a client that does not already know every width
+cannot tell where one ends, and a value truncated by the MTU is
+indistinguishable from a short one. The newer opcode length-prefixes each
+value, which makes both problems go away — and a peer that has not
+implemented it says so with `request not supported`. They differ whenever the peer offers less, and sizing by the wrong
 one truncates a long read silently. The read side is exercised over real
 radios by `tools/live-two-radios/`, whose server offers a 300-octet
 characteristic behind a 23-octet MTU; the long *write* is still suite-only,
@@ -725,14 +733,6 @@ box to run on, which is the trade being made rather than a gap to close.
 Not implemented:
 
 - **LE privacy** (resolving list, RPA) and the controller filter-accept-list.
-- **Read Multiple Variable Length** (0x20, from 5.2), refused as unsupported.
-  Older Read Multiple returns values concatenated with no delimiters, so a
-  client cannot split them without already knowing each length; 0x20 prefixes
-  each with its length and fixes that. Low priority because anything it does
-  can be done with separate reads — but *not* because the hardware cannot
-  carry it. This entry used to claim it could not be tested here; that was
-  wrong. ATT is host-layer, and both ends of the live harness are ours.
-
 - **Signed Writes.** Verifying one needs a CSRK, which is distributed by
   bonding, which needs SMP. Until that exists the only honest thing to do with
   a signed write is ignore it — and since it is a command, silence is also the
@@ -842,11 +842,17 @@ hardware, and any claim about them should be treated as unverified.
 **But two things once listed here as blocked were never blocked by hardware at
 all**, and saying so was a mistake worth undoing. Read Multiple Variable
 Length is an *ATT* opcode and Enhanced ATT bearers are an *L2CAP* mode: both
-are host-layer, carried as ordinary ACL payload that the controller never
-inspects. Both ends of the live harness are this library, so both ends can be
-taught them, and a pair of 5.1 controllers will carry them perfectly well.
-What blocks those is that they are unimplemented — which is a different and
-much cheaper problem than needing new radios.
+are host-layer, carried as ordinary ACL payload the controller never inspects.
+
+Read Multiple Variable Length is now implemented, and it settled the argument
+by running. `tools/live-two-radios/read-multiple-variable.lisp` passes 5/5
+**between two of the 5.1 Realteks** — the radios this section called too old
+for it — as well as with the 5.4 Barrot as the client. What was blocking it
+was that nobody had written it, which is a different and much cheaper problem
+than needing new radios.
+
+EATT is the same shape of job and equally unblocked by hardware; it is simply
+a bigger one.
 
 `compile-check.lisp` beside them needs no hardware at all: it loads every
 definition, compiles the forms that drive the radios without running them, and

@@ -887,12 +887,87 @@ database that reads plausibly and points at the wrong attributes."
 (test an-unsupported-request-is-refused-not-ignored
   (let* ((lb (make-loopback (demo-server)))
          (chan (loopback-client lb)))
-    ;; 0x20 Read Multiple Variable Length Request (BT 5.2): a real request
-    ;; this server does not implement, so it must be refused rather than
-    ;; ignored -- a client is waiting for an answer to it.
-    (let ((rsp (ble:att-request chan (hex->octets "20" "0300" "0500"))))
+    ;; 0x14 is not an assigned ATT opcode, and bit 6 is clear, so it is a
+    ;; REQUEST -- which must be refused rather than dropped, because a client
+    ;; is waiting for an answer to it. (This test used 0x20 until 0x20 was
+    ;; implemented; an example of something unsupported has to be something
+    ;; actually unsupported, or it silently stops testing anything.)
+    (let ((rsp (ble:att-request chan (hex->octets "14" "0300" "0500"))))
       (is-true (ble:att-error-p rsp) "an Error Response must come back")
       (is (= #x06 (aref rsp 4)) "request not supported"))))
+
+;;; --- Read Multiple Variable Length (0x20) ------------------------------
+;;;
+;;; The opcode's whole reason to exist is that the older one loses the
+;;; boundaries, so that is what these check: the same two attributes read
+;;; both ways, separated by one and run together by the other.
+
+(test read-multiple-variable-separates-what-read-multiple-runs-together
+  (multiple-value-bind (server value-handle) (demo-server)
+    (let* ((lb (make-loopback server))
+           (chan (loopback-client lb))
+           (acme (map '(simple-array (unsigned-byte 8) (*)) #'char-code "ACME")))
+      (multiple-value-bind (values err)
+          (ble:att-read-multiple-variable chan (list 3 value-handle))
+        (is (null err))
+        (is (= 2 (length values)) "two attributes, two values")
+        (is (equalp acme (first values)))
+        (is (equalp #(1 2 3) (second values))))
+      ;; The same read through the old opcode: identical bytes, and nothing
+      ;; in them says where the first value stopped.
+      (multiple-value-bind (blob err)
+          (ble:att-read-multiple chan (list 3 value-handle))
+        (is (null err))
+        (is (= 7 (length blob))
+            "4 + 3 octets concatenated, with no boundary recorded anywhere")))))
+
+(test read-multiple-variable-refuses-an-unreadable-handle-by-name
+  (multiple-value-bind (server vh cccd ffe2 ffe3) (demo-server)
+    (declare (ignore cccd ffe2))
+    (let* ((lb (make-loopback server))
+           (chan (loopback-client lb)))
+      ;; FFE3 has no properties at all, so it cannot be read -- and one
+      ;; unreadable handle must sink the whole response rather than quietly
+      ;; returning the attributes that did pass.
+      (multiple-value-bind (values err)
+          (ble:att-read-multiple-variable chan (list 3 ffe3))
+        (is (null values))
+        (is (= #x02 err) "read not permitted"))
+      ;; The refusal has to name 0x20 as the request it refers to, or a
+      ;; client cannot match the error to what it asked.
+      (let ((rsp (ble:att-request chan
+                                  (let ((pdu (ble:make-octets 5)))
+                                    (setf (aref pdu 0) #x20)
+                                    (ble:u16le-put pdu 1 3)
+                                    (ble:u16le-put pdu 3 ffe3)
+                                    pdu))))
+        (is-true (ble:att-error-p rsp))
+        (is (= #x20 (aref rsp 1)) "the error names the request opcode")
+        (is (= ffe3 (ble::u16-le rsp 2)) "and the offending handle"))
+      (is (integerp vh)))))
+
+(test read-multiple-variable-drops-a-value-the-mtu-cut-rather-than-returning-half
+  ;; The failure the old opcode cannot even report: a value clipped by the
+  ;; MTU. Here the clip is detectable -- the declared length runs past the end
+  ;; of the PDU -- so the short one is dropped instead of being handed back
+  ;; looking like a whole value.
+  (let* ((server (ble:make-gatt-server :mtu 23))   ; room for 22 octets of body
+         (short (make-array 10 :element-type '(unsigned-byte 8) :initial-element 7))
+         (long  (make-array 20 :element-type '(unsigned-byte 8) :initial-element 9)))
+    (ble:gatt-add-service server #xFF00)
+    (let ((a (ble:gatt-add-characteristic server :uuid #xFF01 :properties '(:read)
+                                                 :value short))
+          (b (ble:gatt-add-characteristic server :uuid #xFF02 :properties '(:read)
+                                                 :value long)))
+      (let* ((lb (make-loopback server))
+             (chan (loopback-client lb)))
+        (multiple-value-bind (values err)
+            (ble:att-read-multiple-variable chan (list a b))
+          (is (null err))
+          (is (= 1 (length values))
+              "only the value that arrived whole is returned")
+          (is (equalp short (first values))
+              "and it is the whole one, not a fragment of the other"))))))
 
 (test the-wrong-group-type-is-refused-rather-than-answered-empty
   "A client must be able to tell 'no services there' from 'that is not a

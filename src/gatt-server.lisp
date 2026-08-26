@@ -452,6 +452,63 @@ than answered emptily, or a client cannot tell 'none' from 'not that kind'."
       (replace rsp chunk :start1 1)
       (att-send chan rsp))))
 
+(defun %handle-read-multiple-variable (server chan pdu)
+  "Read Multiple Variable Length (0x20). Like Read Multiple, except each value
+is returned behind its own two-octet length, so the client can separate them
+without knowing the widths in advance.
+
+The permission checks are deliberately identical to Read Multiple\'s and to
+Read By Type\'s: a new way to reach a value must not become a new way around
+its permissions, and a refusal names the offending handle and abandons the
+whole response rather than quietly returning the attributes that did pass.
+
+Truncation differs from the old opcode in a way worth stating. Both cut at
+the MTU, but here the cut is DETECTABLE: a value whose declared length runs
+past the end of the PDU is one the client knows it did not get. So a value is
+either written whole, or its length is written and the data cut -- and never
+silently merged into its neighbour, which is exactly the failure the old
+opcode cannot report."
+  (let ((values '()))
+    (loop for off from 1 below (length pdu) by 2
+          while (<= (+ off 2) (length pdu))
+          do (let ((attr (gatt-find-attribute server (u16-le pdu off))))
+               (cond ((null attr)
+                      (return-from %handle-read-multiple-variable
+                        (%send-att-error chan +att-read-multiple-variable-req+
+                                         (u16-le pdu off)
+                                         +att-err-invalid-handle+)))
+                     ((not (%readable-p attr))
+                      (return-from %handle-read-multiple-variable
+                        (%send-att-error chan +att-read-multiple-variable-req+
+                                         (u16-le pdu off)
+                                         +att-err-read-not-permitted+)))
+                     ((%security-shortfall server attr)
+                      (return-from %handle-read-multiple-variable
+                        (%send-att-error chan +att-read-multiple-variable-req+
+                                         (u16-le pdu off)
+                                         (%security-shortfall server attr))))
+                     (t (push (gatt-attribute-read server attr) values)))))
+    (let* ((room (- (gatt-server-mtu server) 1))
+           (body (make-octets room))
+           (n 0))
+      (dolist (v (nreverse values))
+        (when (>= n room) (return))
+        (let ((v (or v #())))
+          ;; The length goes in whole or not at all: half a length is not
+          ;; something a reader can recover from.
+          (when (> (+ n 2) room) (return))
+          (u16le-put body n (length v))
+          (incf n 2)
+          (let ((take (min (length v) (- room n))))
+            (replace body v :start1 n :end2 take)
+            (incf n take)
+            ;; Cut short: nothing after this could be found anyway.
+            (when (< take (length v)) (return)))))
+      (let ((rsp (make-octets (1+ n))))
+        (setf (aref rsp 0) +att-read-multiple-variable-rsp+)
+        (replace rsp body :start1 1 :end2 n)
+        (att-send chan rsp)))))
+
 (defun %handle-write (server chan pdu &key command)
   "Write Request, or Write Command when COMMAND. A command gets no response
 whatever happens -- including on refusal, which is exactly why a client that
@@ -593,6 +650,7 @@ apart is exactly what you need when a client is not doing what you expected.")
               (case op (#x02 "exchange-mtu") (#x04 "find-info")
                        (#x06 "find-by-type-value") (#x08 "read-by-type")
                        (#x0A "read") (#x0C "read-blob") (#x0E "read-multiple")
+                       (#x20 "read-multiple-variable")
                        (#x10 "read-by-group-type") (#x12 "write")
                        (#x16 "prepare-write") (#x18 "execute-write")
                        (#x52 "write-cmd") (t "?"))
@@ -626,6 +684,8 @@ Response that says so."
           ((= op +att-read-req+) (need 3) (%handle-read server chan pdu) op)
           ((= op +att-read-blob-req+) (need 5) (%handle-read server chan pdu :blob t) op)
           ((= op +att-read-multiple-req+) (need 5) (%handle-read-multiple server chan pdu) op)
+          ((= op +att-read-multiple-variable-req+) (need 5)
+           (%handle-read-multiple-variable server chan pdu) op)
           ((= op +att-write-req+) (need 3) (%handle-write server chan pdu) op)
           ((= op +att-write-cmd+) (need 3) (%handle-write server chan pdu :command t) op)
           ((= op +att-prepare-write-req+) (need 5)

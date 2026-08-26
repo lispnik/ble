@@ -163,6 +163,7 @@
           value-may-be-truncated-p
           att-write-value
           att-read-multiple
+          att-read-multiple-variable
           att-prepare-write
           att-execute-write
           att-write-long-value

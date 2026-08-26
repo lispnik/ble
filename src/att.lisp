@@ -51,6 +51,8 @@
 (defconstant +att-read-blob-req+     #x0C)
 (defconstant +att-read-multiple-req+ #x0E)
 (defconstant +att-read-multiple-rsp+ #x0F)
+(defconstant +att-read-multiple-variable-req+ #x20)
+(defconstant +att-read-multiple-variable-rsp+ #x21)
 (defconstant +att-prepare-write-req+ #x16)
 (defconstant +att-prepare-write-rsp+ #x17)
 (defconstant +att-execute-write-req+ #x18)
@@ -391,6 +393,51 @@ turns N round trips into one."
       (cond ((null rsp) (values nil :timeout))
             ((att-error-p rsp) (values nil (when (>= (length rsp) 5) (aref rsp 4))))
             (t (values (subseq rsp 1) nil))))))
+
+(defun att-read-multiple-variable (chan handles)
+  "Read several attributes in one round trip, WITH their lengths. Returns
+(VALUES LIST-OF-OCTET-VECTORS ERROR).
+
+The fix for ATT-READ-MULTIPLE, which returns the values run together with
+nothing between them, so a client that does not already know each width
+cannot tell where one ends. Here each value arrives behind a two-octet
+length, and the list that comes back is the values, separated.
+
+Introduced in Bluetooth 5.2 -- but that is a specification version, not a
+hardware requirement. This is an ATT opcode: it travels as ordinary ACL
+payload that the controller never looks at, so any pair of radios that can
+carry a connection can carry it, whatever their core version says. What a
+peer needs is a HOST that implements it, and a peer that does not answers
+Request Not Supported, which comes back here as error #x06.
+
+TRUNCATION IS VISIBLE, which is the other thing the old opcode could not do.
+The response is cut to the MTU, and a value clipped by that cut arrives
+shorter than its own declared length. Rather than hand back a fragment that
+looks like a value, the short one is dropped and reported: a caller gets the
+values that arrived whole, and can ask for the rest by name."
+  (let* ((handles (coerce handles 'list))
+         (pdu (make-octets (+ 1 (* 2 (length handles))))))
+    (setf (aref pdu 0) +att-read-multiple-variable-req+)
+    (loop for h in handles
+          for i from 1 by 2
+          do (u16le-put pdu i h))
+    (let ((rsp (att-request chan pdu :expect +att-read-multiple-variable-rsp+)))
+      (cond
+        ((null rsp) (values nil :timeout))
+        ((att-error-p rsp) (values nil (when (>= (length rsp) 5) (aref rsp 4))))
+        (t
+         (let ((out '()) (off 1))
+           (loop
+             ;; A length needs two octets to be a length at all.
+             (when (> (+ off 2) (length rsp)) (return))
+             (let ((len (u16-le rsp off)))
+               (incf off 2)
+               ;; Declared longer than what is here: the MTU cut it, and the
+               ;; rest of the response is gone with it.
+               (when (> (+ off len) (length rsp)) (return))
+               (push (subseq rsp off (+ off len)) out)
+               (incf off len)))
+           (values (nreverse out) nil)))))))
 
 ;;; --- long writes ------------------------------------------------------
 
