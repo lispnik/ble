@@ -797,6 +797,53 @@ Pi the built-in radio is the *only* one that hears the device while both
 dongles report nothing. `hciN` numbering also drifts across reboots, so
 resolve by bus and capability rather than assuming an index.
 
+### When an adapter insists it is RF-killed and rfkill disagrees
+
+```
+$ sudo hciconfig hci0 up
+Can't init device hci0: Operation not possible due to RF-kill (132)
+$ rfkill list
+  hci0 type=bluetooth soft=0 hard=0        # ... not blocked at all
+```
+
+The obvious remedy does nothing:
+
+```sh
+sudo rfkill unblock bluetooth      # silent, and a no-op
+```
+
+The fix is to **toggle**, so that a state change actually happens:
+
+```sh
+sudo rfkill block bluetooth && sleep 2 && sudo rfkill unblock bluetooth
+```
+
+Two lines of `hci_rfkill_set_block` (`net/bluetooth/hci_core.c`) explain both
+halves, and the first is this library's doing:
+
+```c
+if (hci_dev_test_flag(hdev, HCI_USER_CHANNEL))
+        return -EBUSY;
+if (blocked == hci_dev_test_flag(hdev, HCI_RFKILLED))
+        return 0;
+```
+
+**An rfkill event that arrives while a device is in user channel is refused
+outright.** The kernel's `HCI_RFKILLED` flag is simply not updated, and from
+then on it disagrees with the switch — the switch says unblocked, the flag
+says blocked, and `hci_dev_open` refuses with `ERFKILL`. Anything that takes
+an adapter over with `HCI_CHANNEL_USER` can leave it in that state, which
+means this library can, and on the development Pi it did.
+
+Unblocking cannot repair it because the rfkill *core* short-circuits: the soft
+state is already 0, so the driver callback is never invoked and the stale flag
+is never reached. Blocking first forces a real transition, and the unblock
+that follows then reaches the callback and clears the flag.
+
+Worth recognising on sight, because it presents as dead hardware. `rfkill`
+reporting `soft=0 hard=0` while the adapter refuses to open **is** the
+signature: a switch and a flag that no longer agree.
+
 ## Testing against it, with two radios
 
 `tools/live-two-radios/` is the end-to-end check that needs hardware: two USB
