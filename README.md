@@ -951,6 +951,37 @@ The bulk-transfer example clients ask for a shorter interval; the sensor
 examples deliberately do not, because a battery peripheral notifying once a
 second wants the opposite trade.
 
+## A controller quirk worth knowing about
+
+On the TP-Link RTL8761B dongles this was developed against, **every encrypted
+session ends with the dongle being reset by the kernel**:
+
+```
+Bluetooth: hciN: HCI reset during shutdown failed
+Bluetooth: hciN: command tx timeout
+Bluetooth: hciN: Resetting usb device.
+```
+
+The device then re-enumerates at a *new* `hciN` index. That is why nothing in
+this repository should select an adapter by index and expect it to keep:
+`tools/nus-throughput/` sorts by BD_ADDR instead, and the comment there
+explains why.
+
+It is not this library doing it, and that took some proving. A bare
+open/close does not cause it; nor does closing while advertising, while
+scanning, or with an unencrypted connection still up — thirty-three cycles
+across eight variants, zero timeouts. A paired, encrypted session causes it
+every time, exactly twice, once per end. Disconnecting before releasing the
+adapter does not prevent it. Neither does resetting the controller ourselves
+first, with a timeout longer than the kernel's.
+
+So it appears to be the controller failing to answer the kernel's shutdown
+Reset within its two-second window after an encrypted link, and btusb forcing
+a USB reset to recover. The practical consequences are the index churn above,
+and that any *other* socket open on that dongle dies with it — which is what
+makes a second paired session immediately after a first one fail unless the
+indices are looked up again.
+
 ## Commands the controller refused
 
 `send-hci-command` waits for the Command Complete or Command Status and

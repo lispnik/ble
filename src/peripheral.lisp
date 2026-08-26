@@ -280,4 +280,17 @@ loses simply never sees them."
                             ;; link secured before it is asked to do work.
                             (when pairing (%drive-pairing pairing server conn))
                             (when on-tick (funcall on-tick conn op))))))))))
+      ;; Disconnect before the adapter goes back, and in this order. Releasing
+      ;; a user-channel socket with a link still up leaves the controller
+      ;; holding a connection the kernel knows nothing about; the HCI Reset the
+      ;; kernel sends while closing the device then goes unanswered, and btusb
+      ;; resets the USB device to force it into a known state -- which
+      ;; re-registers the adapter at a new index and kills any other socket on
+      ;; it. The kernel says "HCI reset during shutdown failed" and then
+      ;; "command tx timeout"; nothing points at the peripheral that caused it.
+      ;;
+      ;; Measured, not guessed: a bare open/close does not do it, nor does
+      ;; closing while advertising, scanning, or merely connected. Closing with
+      ;; an ENCRYPTED link up does it every time -- two timeouts, one per end.
+      (when conn (ignore-errors (hci-conn-close conn)))
       (ignore-errors (set-adv-enable sock nil)))))
