@@ -728,8 +728,10 @@ Not implemented:
 - **Read Multiple Variable Length** (0x20, from 5.2), refused as unsupported.
   Older Read Multiple returns values concatenated with no delimiters, so a
   client cannot split them without already knowing each length; 0x20 prefixes
-  each with its length and fixes that. Low priority: anything it does can be
-  done with separate reads, and **it cannot be tested here** — see below.
+  each with its length and fixes that. Low priority because anything it does
+  can be done with separate reads — but *not* because the hardware cannot
+  carry it. This entry used to claim it could not be tested here; that was
+  wrong. ATT is host-layer, and both ends of the live harness are ours.
 
 - **Signed Writes.** Verifying one needs a CSRK, which is distributed by
   bonding, which needs SMP. Until that exists the only honest thing to do with
@@ -824,14 +826,27 @@ from a deliberately downed adapter, all 25/25.
 `PERIPH_DEV`, `CENTRAL_DEV` and `PEER_MAC` override the choice if you need a
 particular pairing; `PERIPH_SECONDS` bounds how long the peripheral serves.
 
-**The dongles are Bluetooth 5.1.** Both report core version `0x0A`,
-manufacturer 93 — Realtek, the RTL8761B in a TP-Link UB500. So nothing from
-5.2 or later can be exercised here at all, whatever the code does: Read
-Multiple Variable Length (0x20), Enhanced ATT bearers, LE Power Control, and
-the 5.2 parts of the feature bitmap are all out of reach. **Testing those
-needs two dongles newer than 5.2**, and until there are some, treat any claim
-about them as unverified — the live harness is the only thing here that has
-ever caught a protocol bug the suite missed, and it cannot catch these.
+**The dongles are Bluetooth 5.1.** Both TP-Link UB500s report core version
+`0x0A`, manufacturer 93 — Realtek RTL8761B. A third dongle, a Barrot part,
+reports core version `0x0D` (5.4), but reporting it is all it does: its
+`LE Read Local Supported Features` comes back `FF F9 01 00 00 00 00 00`, every
+bit from 24 up clear, so it has no 5.2 or 5.3 LE feature either. It does carry
+LL Privacy and Periodic Advertising, which the Realteks do not. **A version
+byte is a claim; the feature bitmap is the capability, and they disagree
+here.**
+
+So the genuinely controller-side 5.2 features — LE Power Control, path loss
+monitoring, the 5.2 parts of the feature bitmap — remain untestable on this
+hardware, and any claim about them should be treated as unverified.
+
+**But two things once listed here as blocked were never blocked by hardware at
+all**, and saying so was a mistake worth undoing. Read Multiple Variable
+Length is an *ATT* opcode and Enhanced ATT bearers are an *L2CAP* mode: both
+are host-layer, carried as ordinary ACL payload that the controller never
+inspects. Both ends of the live harness are this library, so both ends can be
+taught them, and a pair of 5.1 controllers will carry them perfectly well.
+What blocks those is that they are unimplemented — which is a different and
+much cheaper problem than needing new radios.
 
 `compile-check.lisp` beside them needs no hardware at all: it loads every
 definition, compiles the forms that drive the radios without running them, and
