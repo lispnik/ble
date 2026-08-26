@@ -15,7 +15,7 @@
 ;;;; halves as complete.
 (defpackage #:lisp-repl-client
   (:use #:common-lisp)
-  (:export #:run #:eval-remote #:demo #:*demo-script*))
+  (:export #:run #:eval-remote #:demo #:*demo-script* #:grow-a-thermometer))
 (in-package #:lisp-repl-client)
 
 (defun eval-remote (nus text &key (timeout-ms 30000))
@@ -119,6 +119,95 @@ indentation of the file rather than of the output."
                         (setf spacing nil)
                         (write-char c out))))
     (get-output-stream-string out)))
+
+(defun grow-a-thermometer (mac &key (dev 2) (addr-type :random))
+  "Add a Health Thermometer to a running peripheral, over the REPL, and read it.
+
+The answer to `can the celsius calculation be put in GATT as a thermometer
+dynamically\'. It can, and this does it: the database grows while a client is
+connected to it, the client is told with Service Changed, re-discovers, and
+then reads the Pi\'s CPU temperature through a standard 0x2A1C Temperature
+Measurement -- a characteristic that did not exist when the connection was
+made.
+
+Service Changed is why this works at all. A client discovers a database once
+and caches it; without the indication it would keep asking about handles that
+have moved. The specification only requires a peer to honour it when BONDED,
+which this one is, having paired on the way in."
+  (ble:install-adapter-teardown)
+  (ble:with-att-channel
+      (chan (ble:hci-user-att-connect (ble:parse-mac mac) :addr-type addr-type
+                                      :dev dev :init-phys #x01 :timeout 25))
+    (format t "~&connected to ~A~%" mac) (force-output)
+    (unless (pair-with chan mac addr-type) (return-from grow-a-thermometer nil))
+    (let ((nus (ble:nus-attach chan :mtu 247
+                                    :bdaddr-type (if (eq addr-type :random) 1 0))))
+      ;; Subscribe to Service Changed BEFORE anything moves. GATT-NOTIFY
+      ;; refuses to send to a client that has not asked, so a subscription
+      ;; taken afterwards would be too late to hear about the change.
+      (let* ((gatt (ble:att-find-service chan (ble:uuid16 ble:+service-generic-attribute+)))
+             (sc (and gatt (ble:find-char-by-uuid
+                            (ble:att-discover-characteristics
+                             chan :start (ble:gatt-service-start gatt)
+                                  :end (ble:gatt-service-end gatt))
+                            (ble:uuid16 ble:+char-service-changed+)))))
+        (unless sc (error "no Service Changed characteristic to listen on"))
+        (ble:att-subscribe chan (ble:att-find-cccd chan (ble:gatt-char-handle sc))
+                           :indications t)
+        (format t "~&subscribed to Service Changed at handle ~D~%"
+                (ble:gatt-char-handle sc))
+        (format t "~&before: ~:[no~;a~] health thermometer service~%"
+                (ble:att-find-service chan (ble:uuid16 ble:+service-health-thermometer+)))
+        (force-output)
+        ;; Grow the database from the far end.
+        (dolist (form '("(in-package :ble)"
+                       "(gatt-add-service lisp-repl:*server* +service-health-thermometer+)"
+                       "(defparameter cl-user::*t*
+                          (multiple-value-list
+                           (gatt-add-characteristic lisp-repl:*server*
+                             :uuid +char-temperature-measurement+
+                             :properties (list :indicate))))"))
+          (format t "~&   ~A~%   => ~A~%" (one-line form)
+                  (string-trim '(#\Newline) (eval-remote nus form)))
+          (force-output))
+        ;; Announce it, and wait to be told.
+        (eval-remote nus "(gatt-notify lisp-repl:*server* lisp-repl:*connection*
+                            lisp-repl:*service-changed-handle*
+                            (service-changed-range) :indications t)")
+        (let ((told (ble:att-next-notification chan (ble:gatt-char-handle sc) 8000)))
+          (format t "~&Service Changed ~:[did NOT arrive~;arrived: handles ~:*~D..~D moved~]~%"
+                  (and told (>= (length told) 4) (+ (aref told 0) (ash (aref told 1) 8)))
+                  (and told (>= (length told) 4) (+ (aref told 2) (ash (aref told 3) 8))))
+          (force-output))
+        ;; Re-discover, and read the thing that was not there before.
+        (let ((hts (ble:att-find-service chan (ble:uuid16 ble:+service-health-thermometer+))))
+          (format t "~&after:  ~:[no~;a~] health thermometer service~%" hts)
+          (unless hts (return-from grow-a-thermometer nil))
+          (let* ((m (ble:find-char-by-uuid
+                     (ble:att-discover-characteristics
+                      chan :start (ble:gatt-service-start hts)
+                           :end (ble:gatt-service-end hts))
+                     (ble:uuid16 ble:+char-temperature-measurement+))))
+            (ble:att-subscribe chan (ble:att-find-cccd chan (ble:gatt-char-handle m))
+                               :indications t)
+            ;; Ask the far end to take a reading and indicate it, as a real
+            ;; thermometer would -- 0x2A1C indicates, it is not read.
+            (eval-remote nus
+                         "(gatt-notify lisp-repl:*server* lisp-repl:*connection*
+                            (first cl-user::*t*)
+                            (health-thermometer:temperature-measurement
+                             (with-open-file (s \"/sys/class/thermal/thermal_zone0/temp\")
+                               (/ (read s) 1000.0)))
+                            :indications t)")
+            (let ((v (ble:att-next-notification chan (ble:gatt-char-handle m) 8000)))
+              (if v
+                  (format t "~&0x2A1C says: ~,3F C~%"
+                          (let ((mant (logior (aref v 1) (ash (aref v 2) 8)
+                                              (ash (aref v 3) 16)))
+                                (exp (let ((e (aref v 4))) (if (> e 127) (- e 256) e))))
+                            (* mant (expt 10 exp))))
+                  (format t "~&no measurement arrived~%"))
+              (force-output))))))))
 
 (defun run (mac &key (dev 2) (addr-type :random) (forms nil) (script nil)
                      (interactive t))

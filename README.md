@@ -92,6 +92,44 @@ And it is encrypted: the REPL's characteristics require a paired link by
 default, because an unauthenticated remote evaluator is precisely a remote
 shell. `#.` is refused at read time for the same reason — see step 11.
 
+### Growing a thermometer while somebody is connected
+
+Step 4 above adds nothing to GATT. This does. `(lisp-repl-client:grow-a-thermometer
+"AA:BB:...")` builds a real Health Thermometer service on a live peripheral,
+from the other end of the link, and then reads the Pi's CPU temperature back
+through it:
+
+```
+connected to DE:A5:AD:56:D7:2A
+paired; encryption -> T
+subscribed to Service Changed at handle 6
+before: no health thermometer service
+   (in-package :ble)
+   => #<PACKAGE "BLE">
+   (gatt-add-service lisp-repl:*server* +service-health-thermometer+)
+   => 14
+   (defparameter cl-user::*t* (multiple-value-list (gatt-add-characteristic lisp-repl:*server* :uuid +char-temperature-measurement+ :properties (list :indicate))))
+   => COMMON-LISP-USER::*T*
+Service Changed arrived: handles 1..65535 moved
+after:  a health thermometer service
+0x2A1C says: 57.450 C
+```
+
+The attribute vector is adjustable and handles keep counting, so growing a
+database is allowed. What makes it *usable* is **Service Changed** — a client
+discovers a database once and caches it, and has no other way to be told it
+moved. Four examples in this repository declare that characteristic; this is
+the only one that ever indicates on it.
+
+There is a condition worth knowing: the specification only requires a peer to
+honour Service Changed when it is **bonded**. An unbonded client caches by
+address and will keep the stale database however loudly you indicate. The REPL
+pairs and bonds on the way in, which is why it works here and would not on
+most of the other examples.
+
+`0x2A1C` is indicated rather than read, as the real profile requires — see
+`examples/health-thermometer/` for why that distinction matters.
+
 ## Systems
 
 | System | Depends on | Contents |

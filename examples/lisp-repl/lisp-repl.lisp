@@ -35,7 +35,7 @@
   (:use #:common-lisp)
   (:export #:eval-string #:complete-form-p #:build-server #:run
            #:*name* #:*repl-package* #:+end-of-reply+
-           #:*connection* #:*peer*))
+           #:*connection* #:*peer* #:*server* #:*service-changed-handle*))
 
 (in-package #:lisp-repl)
 
@@ -50,6 +50,18 @@ service answers questions somebody anticipated, and this answers the ones
 nobody did -- including questions about itself.")
 
 (defvar *peer* nil "The connected peer's address, on-air order.")
+
+(defvar *server* nil
+  "The GATT server this REPL is being served from.
+
+Exposed so that evaluated code can change the database it is being reached
+through -- add a service, and announce it. The attribute vector is adjustable
+and handles keep counting, so growing a live database is allowed; what makes
+it *work* is Service Changed, because a client discovered the old one and has
+no other way to be told.")
+
+(defvar *service-changed-handle* nil
+  "Where to indicate that the database moved. NIL before a server is built.")
 
 (defparameter *repl-package* (find-package :cl-user)
   "Where forms are read and evaluated. A session may change it, and the change
@@ -137,6 +149,18 @@ file."
     (ble:gatt-add-service server ble:+service-generic-access+)
     (ble:gatt-add-characteristic server :uuid ble:+char-device-name+
                                         :properties '(:read) :value *name*)
+    ;; Generic Attribute, which the other examples declare and never use. Here
+    ;; it earns its place: this database can grow at runtime, and Service
+    ;; Changed is the only way to tell a client that already discovered it.
+    ;; Note the specification's condition -- a peer honours this only if it is
+    ;; BONDED. An unbonded client caches by address and will keep the stale
+    ;; database however loudly we indicate. This REPL pairs and bonds, so it
+    ;; is one of the few peripherals here for which it actually works.
+    (ble:gatt-add-service server ble:+service-generic-attribute+)
+    (setf *service-changed-handle*
+          (ble:gatt-add-characteristic server :uuid ble:+char-service-changed+
+                                              :properties '(:indicate)
+                                              :value (ble:service-changed-range)))
     (ble:gatt-add-service server ble:+nus-service-uuid-le+)
     (let ((rx (ble:gatt-add-characteristic
                server :uuid ble:+nus-rx-uuid-le+
@@ -206,6 +230,7 @@ default, the peer must pair before it can write anything."
   (let* ((s (build-server :secure secure))
          (dev (or dev (ble:default-hci-dev)))
          (pairing nil))
+    (setf *server* (session-server s))
     (ble:install-adapter-teardown)
     (ble:with-hci-user-socket (sock dev)
       (let ((addr (ble:static-random-address (ble:smp-random-octets sock 6))))
