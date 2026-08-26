@@ -1933,3 +1933,113 @@ are: a constant, or a short read leaving zeros."
     (is (= 32 (length a)))
     (is (not (equalp a b)) "two draws must differ")
     (is (notevery #'zerop a) "and must not be all zero")))
+
+;;; --- a checked command must read past whatever is already queued -------
+;;;
+;;; SEND-HCI-COMMAND waits for its own Command Complete and puts everything
+;;; else back on the socket's pending queue. READ-HCI-PACKET serves that queue
+;;; before it touches the socket. Put those two together carelessly and the
+;;; wait eats its own tail: pop a packet that is not ours, push it back, pop
+;;; the same packet again, forever, never reading the socket, until the
+;;; timeout expires and a command that the controller answered promptly is
+;;; reported as unanswered.
+;;;
+;;; It needs an unsolicited event to be queued at the moment a command goes
+;;; out, which is why it hid: on a quiet adapter the queue is empty and
+;;; everything works. It showed up against a controller that reliably emits LE
+;;; Channel Selection Algorithm on connect, and it would equally have hit any
+;;; adapter that happened to have a notification in flight.
+;;;
+;;; A socketpair stands in for the controller: SOCK_DGRAM because HCI is
+;;; message-oriented and each read should yield exactly one packet.
+
+(cffi:defcfun ("socketpair" %test-socketpair) :int
+  (domain :int) (type :int) (protocol :int) (sv :pointer))
+(cffi:defcfun ("write" %test-write) :long
+  (fd :int) (buf :pointer) (count :unsigned-long))
+(cffi:defcfun ("close" %test-close) :int (fd :int))
+
+(defconstant +af-unix+ 1)
+(defconstant +sock-dgram+ 2)
+
+(defun %fake-controller ()
+  "Two ends of a socketpair: (values ours theirs)."
+  (cffi:with-foreign-object (sv :int 2)
+    (unless (zerop (%test-socketpair +af-unix+ +sock-dgram+ 0 sv))
+      (error "socketpair failed"))
+    (values (cffi:mem-aref sv :int 0) (cffi:mem-aref sv :int 1))))
+
+(defun %controller-says (fd octets)
+  (cffi:with-foreign-object (b :unsigned-char (length octets))
+    (dotimes (i (length octets))
+      (setf (cffi:mem-aref b :unsigned-char i) (aref octets i)))
+    (%test-write fd b (length octets))))
+
+(defun %command-complete-for (ogf ocf &optional (status 0))
+  "A Command Complete packet answering OGF/OCF."
+  (let ((opcode (ble::hci-opcode ogf ocf)))
+    (make-array 7 :element-type '(unsigned-byte 8)
+                  :initial-contents (list 4 #x0E 4 1
+                                          (ldb (byte 8 0) opcode)
+                                          (ldb (byte 8 8) opcode)
+                                          status))))
+
+;; LE Meta / LE Channel Selection Algorithm -- the real packet that exposed it.
+(defparameter *an-unsolicited-event*
+  (make-array 7 :element-type '(unsigned-byte 8)
+                :initial-contents '(4 #x3E 4 #x14 #x40 0 1)))
+
+(test a-checked-command-reads-past-an-already-queued-event
+  (multiple-value-bind (ours theirs) (%fake-controller)
+    (unwind-protect
+         (let ((sock (ble::make-hci-socket :fd ours :dev 0)))
+           ;; The state that used to livelock: something queued before we ask.
+           (setf (ble::hci-socket-pending sock) (list *an-unsolicited-event*))
+           (%controller-says theirs (%command-complete-for ble::+ogf-le+ #x000C))
+           (let ((answer (ble:send-hci-command sock ble::+ogf-le+ #x000C #()
+                                               :timeout-ms 500)))
+             (is (not (null answer))
+                 "the Command Complete is found even with an event queued ~
+                  ahead of it -- NIL here is the livelock, timed out")
+             (is (equalp (list *an-unsolicited-event*)
+                         (ble::hci-socket-pending sock))
+                 "and the queued event is still there, exactly once: it ~
+                  belongs to whoever was waiting for it")))
+      (%test-close ours) (%test-close theirs))))
+
+(test a-checked-command-keeps-events-in-order
+  (multiple-value-bind (ours theirs) (%fake-controller)
+    (unwind-protect
+         (let* ((sock (ble::make-hci-socket :fd ours :dev 0))
+                (early (make-array 4 :element-type '(unsigned-byte 8)
+                                     :initial-contents '(4 #xFF 1 1)))
+                (late  (make-array 4 :element-type '(unsigned-byte 8)
+                                     :initial-contents '(4 #xFF 1 2))))
+           (setf (ble::hci-socket-pending sock) (list early))
+           ;; Arrives during the wait, so it must land behind the one that was
+           ;; already queued rather than in front of it.
+           (%controller-says theirs late)
+           (%controller-says theirs (%command-complete-for ble::+ogf-le+ #x000C))
+           (is (not (null (ble:send-hci-command sock ble::+ogf-le+ #x000C #()
+                                                :timeout-ms 500))))
+           (is (equalp (list early late) (ble::hci-socket-pending sock))
+               "queued first, arrived second -- that order survives the wait"))
+      (%test-close ours) (%test-close theirs))))
+
+(test a-refused-command-still-hands-back-what-it-read
+  ;; The error path is the one that leaks: an HCI-COMMAND-ERROR unwinds out of
+  ;; the middle of the wait, and anything read on the way must not vanish
+  ;; with it.
+  (multiple-value-bind (ours theirs) (%fake-controller)
+    (unwind-protect
+         (let ((sock (ble::make-hci-socket :fd ours :dev 0)))
+           (%controller-says theirs *an-unsolicited-event*)
+           (%controller-says theirs
+                             (%command-complete-for ble::+ogf-le+ #x000C #x0C))
+           (signals ble:hci-command-error
+             (ble:send-hci-command sock ble::+ogf-le+ #x000C #()
+                                   :timeout-ms 500))
+           (is (equalp (list *an-unsolicited-event*)
+                       (ble::hci-socket-pending sock))
+               "the event read before the refusal is still queued"))
+      (%test-close ours) (%test-close theirs))))

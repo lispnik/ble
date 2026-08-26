@@ -225,22 +225,45 @@ there is no answer to read."
       (let ((deadline (+ (get-internal-real-time)
                          (round (* timeout-ms internal-time-units-per-second)
                                 1000))))
-        (loop
-          (let ((remaining (round (* 1000 (- deadline (get-internal-real-time)))
-                                  internal-time-units-per-second)))
-            (when (<= remaining 0) (return nil))
-            (let ((answer (read-hci-packet sock :timeout-ms (min 200 remaining))))
-              (cond
-                ((null answer))            ; nothing yet; the deadline decides
-                ((%command-answer-p answer opcode)
-                 (let ((status (command-answer-status answer)))
-                   (unless (zerop status)
-                     (error 'hci-command-error :opcode opcode :status status
-                                               :name name))
-                   (return answer)))
-                ;; Not ours. Put it back for whoever it belongs to.
-                (t (setf (hci-socket-pending sock)
-                         (nconc (hci-socket-pending sock) (list answer))))))))))))
+        ;; Take the queue aside for the duration of the wait, and hold what
+        ;; arrives meanwhile in a local.
+        ;;
+        ;; NOT AN OPTIMISATION -- without it this livelocks. READ-HCI-PACKET
+        ;; serves the pending queue before it touches the socket, so requeuing
+        ;; a non-matching packet as we went meant reading the same packet back
+        ;; on the very next turn, forever: pop, not mine, push, pop. The socket
+        ;; was never read again, so the Command Complete we were waiting for
+        ;; could not arrive, and every command issued while any unsolicited
+        ;; event happened to be queued failed with "no response" after burning
+        ;; the whole timeout at full tilt.
+        ;;
+        ;; Our own answer cannot be in STASH: the queue only holds packets read
+        ;; before this command was written. Order is preserved by putting the
+        ;; stash back in front of what arrived during the wait.
+        (let ((stash (hci-socket-pending sock))
+              (extra '()))
+          (setf (hci-socket-pending sock) '())
+          (unwind-protect
+               (loop
+                 (let ((remaining (round (* 1000 (- deadline (get-internal-real-time)))
+                                         internal-time-units-per-second)))
+                   (when (<= remaining 0) (return nil))
+                   (let ((answer (read-hci-packet sock :timeout-ms (min 200 remaining))))
+                     (cond
+                       ((null answer))       ; nothing yet; the deadline decides
+                       ((%command-answer-p answer opcode)
+                        (let ((status (command-answer-status answer)))
+                          (unless (zerop status)
+                            (error 'hci-command-error :opcode opcode :status status
+                                                      :name name))
+                          (return answer)))
+                       ;; Not ours. Keep it for whoever it belongs to.
+                       (t (push answer extra))))))
+            ;; However this ends -- answer, timeout, or the error above -- the
+            ;; packets that are not ours belong back on the queue.
+            (setf (hci-socket-pending sock)
+                  (nconc stash (nreverse extra)
+                         (hci-socket-pending sock)))))))))
 
 (defparameter *hci-read-buffer-size* 2048)
 
@@ -267,7 +290,12 @@ behaviour and still what an endless scan loop wants."
 (defun hci-read-bd-addr (&key (dev 0) sock)
   "The controller's own BD_ADDR, on-air byte order."
   (let* ((own-socket (null sock))
-         (sock (or sock (open-hci-socket :dev dev))))
+         (sock (or sock (open-hci-socket :dev dev)))
+         ;; Report the adapter we actually talked to. DEV is only the one to
+         ;; open when no socket was handed in, so blaming it in the error
+         ;; named hci0 for a failure on hci1 -- which sent an hour after the
+         ;; wrong adapter.
+         (dev (hci-socket-dev sock)))
     (unwind-protect
          ;; The address is this command's return parameters, and
          ;; SEND-HCI-COMMAND already waited for them and checked the status --
@@ -480,7 +508,20 @@ bytes including RSSI inline, then data."
 ;;;   duration            2 bytes (0 = until disabled)
 ;;;   period              2 bytes
 
+(defun stop-extended-scan (sock)
+  "Disable extended scanning. Safe when nothing is scanning."
+  (ignore-errors
+   (send-hci-command sock +ogf-le+ +ocf-le-set-extended-scan-enable+
+                     (make-octets 6))))
+
 (defun start-extended-scan (sock)
+  ;; Stop first, always. LE Set Extended Scan Parameters is refused with
+  ;; Command Disallowed while a scan is enabled, and a scan left enabled by
+  ;; some earlier process -- hcitool lescan is notorious for exactly this --
+  ;; is neither this process's doing nor something a caller can be asked to
+  ;; clear. Errors ignored on purpose: not scanning is the goal, and a
+  ;; controller that was already idle may refuse the disable.
+  (stop-extended-scan sock)
   (let ((params (make-octets 13)))
     (setf (aref params 0) 0          ; own_addr_type = public
           (aref params 1) 0          ; scan_filter_policy = accept all
@@ -501,6 +542,11 @@ bytes including RSSI inline, then data."
 (defconstant +ocf-le-set-scan-parameters+ #x000B)
 (defconstant +ocf-le-set-scan-enable+     #x000C)
 
+(defun stop-le-scan (sock)
+  "Disable legacy scanning. Safe when nothing is scanning."
+  (ignore-errors
+   (send-hci-command sock +ogf-le+ +ocf-le-set-scan-enable+ (make-octets 2))))
+
 (defun start-le-scan (sock &key (active t) (interval #x0010) (window #x0010))
   "Legacy LE Set Scan Parameters + Set Scan Enable (4.0).
 
@@ -509,6 +555,8 @@ only way to scan the Coded PHY, but they are not implemented by every
 controller -- notably some built-in radios -- and an ordinary legacy
 advertiser on the 1M PHY needs nothing more than this. ACTIVE requests scan
 responses, which is where many devices put their name."
+  ;; Stop first, for the reason given on START-EXTENDED-SCAN.
+  (stop-le-scan sock)
   (let ((params (make-octets 7)))
     (setf (aref params 0) (if active 1 0))
     (u16le-put params 1 interval)
@@ -520,15 +568,6 @@ responses, which is where many devices put their name."
     (setf (aref params 0) 1             ; enable
           (aref params 1) 0)            ; do not filter duplicates
     (send-hci-command sock +ogf-le+ +ocf-le-set-scan-enable+ params)))
-
-(defun stop-le-scan (sock)
-  (ignore-errors
-   (send-hci-command sock +ogf-le+ +ocf-le-set-scan-enable+ (make-octets 2))))
-
-(defun stop-extended-scan (sock)
-  (ignore-errors
-   (send-hci-command sock +ogf-le+ +ocf-le-set-extended-scan-enable+
-                     (make-octets 6))))
 
 ;;; --- advertising reports out of an HCI packet -------------------------
 

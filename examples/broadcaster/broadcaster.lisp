@@ -94,12 +94,21 @@ until the two numbers were pulled apart."
     (ble:install-adapter-teardown)
     (ble:with-hci-user-socket (sock dev)
       (let ((addr (ble:static-random-address (ble:smp-random-octets sock 6))))
-        ;; An extended set carries its own address, set per handle rather than
-        ;; for the controller as a whole -- which is what lets several sets
-        ;; advertise as different devices at once.
-        (ble:set-adv-set-random-address sock +set-handle+ addr)
+        ;; PARAMETERS FIRST, and the order is not stylistic. Setting the
+        ;; parameters is what CREATES the advertising set; an extended set
+        ;; carries its own address, set per handle rather than for the
+        ;; controller as a whole -- which is what lets several sets advertise
+        ;; as different devices at once -- but there is no handle to attach an
+        ;; address to until the set exists. The spec is explicit: addressing a
+        ;; set that does not exist earns Unknown Advertising Identifier
+        ;; (0x42). This example had it the other way round and worked anyway,
+        ;; because the Realtek dongles it was written on create the set
+        ;; implicitly and say nothing; a Barrot BT5.4 controller refuses it
+        ;; exactly as written. Two chipsets, one of them lenient, is how a
+        ;; spec violation stays invisible.
         (ble:set-extended-adv-parameters sock +set-handle+
                                          :interval-ms interval-ms :phy phy)
+        (ble:set-adv-set-random-address sock +set-handle+ addr)
         (let ((data (payload :name name :counter counter)))
           (ble:set-extended-adv-data sock +set-handle+ data)
           (format t "~&~A broadcasting on hci~D as ~A~%~

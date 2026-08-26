@@ -61,7 +61,13 @@ a characteristic is invisible in that respect until its address changes."
 
 (defun set-adv-set-random-address (sock handle mac)
   "Bind a 6-byte random BD_ADDR to advertising set HANDLE. The high two
-bits of MAC[5] should be 11 (static random) for compatibility."
+bits of MAC[5] should be 11 (static random) for compatibility.
+
+CALL SET-EXTENDED-ADV-PARAMETERS FOR HANDLE FIRST. That command is what
+creates the advertising set, and a controller is required to answer Unknown
+Advertising Identifier (0x42) here if the set does not exist yet. Some
+controllers create it implicitly and accept this in either order, which is
+how the wrong order survives testing on one dongle and fails on the next."
   (assert (= (length mac) 6) (mac) "MAC must be 6 bytes, got ~D" (length mac))
   (let ((params (make-octets 7)))
     (setf (aref params 0) (logand handle #xFF))

@@ -953,11 +953,10 @@ second wants the opposite trade.
 
 ## A controller quirk worth knowing about
 
-On the TP-Link RTL8761B dongles this was developed against, **every encrypted
-session ends with the dongle being reset by the kernel**:
+After a session with an encrypted link, the kernel logs this and — on some
+adapters — resets the dongle over USB:
 
 ```
-Bluetooth: hciN: HCI reset during shutdown failed
 Bluetooth: hciN: command tx timeout
 Bluetooth: hciN: Resetting usb device.
 ```
@@ -965,41 +964,51 @@ Bluetooth: hciN: Resetting usb device.
 The device then re-enumerates at a *new* `hciN` index. That is why nothing in
 this repository should select an adapter by index and expect it to keep:
 `tools/nus-throughput/` sorts by BD_ADDR instead, and the comment there
-explains why.
+explains why. That part has never been in doubt and is the only part that
+affects how you write code against this library.
 
-It is not this library doing it, and that took some proving. A bare
-open/close does not cause it; nor does closing while advertising, while
-scanning, or with an unencrypted connection still up — thirty-three cycles
-across eight variants, zero timeouts. A paired, encrypted session causes it
-every time, exactly twice, once per end. Disconnecting before releasing the
-adapter does not prevent it. Neither does resetting the controller ourselves
-first, with a timeout longer than the kernel's.
+**The attribution below was wrong once, and the correction is the useful
+part.** This section previously said the cause was Realtek firmware failing to
+answer the kernel's shutdown Reset, that it was therefore unavoidable from
+userspace, and that a non-Realtek adapter would be the test. The test arrived,
+in the form of a Barrot BT5.4 dongle, and it refuted the claim: **a
+non-Realtek controller produces `command tx timeout` too.**
 
-The kernel source settles it. `btrtl_shutdown_realtek` (`drivers/bluetooth/
-btrtl.c`) sends an HCI Reset on *every* close — its comment says the vendor
-driver requires it or the firmware crashes — and allows `HCI_CMD_TIMEOUT`,
-which is two seconds (`include/net/bluetooth/hci.h`). When that expires,
-`hci_cmd_timeout` (`net/bluetooth/hci_core.c`) calls `hdev->reset`, which for
-these parts is `btusb_rtl_reset`: the USB reset above.
+What survived the correction, and what did not:
 
-Three things follow, and all three were checked rather than assumed:
+- **Not chipset-specific.** Both a Realtek RTL8761B and a Barrot controller
+  produce the timeout.
+- **The USB reset *is* chipset-specific**, which is what made the two look like
+  one thing. `hci_cmd_timeout` (`net/bluetooth/hci_core.c`) ends with
+  `if (hdev->reset) hdev->reset(hdev);` — and `btusb.c` assigns `hdev->reset`
+  for Intel, MediaTek, Qualcomm and Realtek only. So on Realtek a timeout
+  becomes a USB reset and a new index; on the Barrot the same timeout is logged
+  and nothing else happens. The index churn is a Realtek amplifier on a general
+  problem.
+- **Not deterministic, and workload-dependent.** The earlier "every time,
+  exactly twice" was measured on one heavy workload — a full `serve-peripheral`
+  session with pairing, GATT, NUS and a scripted conversation over it. A
+  minimal pair-and-encrypt session on the *same two dongles* produces **zero**
+  timeouts across repeated runs, and even the heavy workload sometimes comes up
+  clean. Anything claiming an invariant here should be measured over several
+  runs before it is believed; this section previously was not.
+- **It is not the shutdown Reset going unanswered.** The message we get is the
+  bare `command tx timeout` with **no opcode in it**. Reading `hci_cmd_timeout`
+  again, that is the `else` branch — the one taken when `hdev->req_skb` is
+  NULL, meaning the command timer fired with *no command outstanding*. A
+  controller ignoring a Reset would name the opcode. So the thing to chase is a
+  timer left armed, not a firmware that will not answer.
 
-- It is **unavoidable from userspace**. `hdev->shutdown` is assigned
-  unconditionally for Realtek devices in `btusb.c`, there is no quirk to skip
-  it, and `hci_dev_close_sync` deliberately clears the user-channel flag
-  before running it so the kernel *can* send commands during cleanup.
-- The kernel **cannot** tear our links down first. In user channel it has no
-  `hci_conn` objects for connections userspace made, so the Reset arrives with
-  whatever we left running still running.
-- But tidying up first does not help either. Disconnecting before release,
-  waiting for the Disconnection Complete before release, and resetting the
-  controller ourselves with a longer timeout were each tried and each still
-  produced exactly two timeouts per session.
+What was tried and did not help: disconnecting before releasing the adapter,
+waiting for the Disconnection Complete before releasing it, and resetting the
+controller ourselves with a longer timeout than the kernel allows itself. The
+first two are right on their own terms and were kept; the third was reverted.
 
-The practical consequences are the index churn above, and that any *other*
-socket open on that dongle dies with it — which is what makes a second paired
-session immediately after a first one fail unless the indices are looked up
-again. Non-Realtek adapters would be the test of the attribution.
+So this is open, with a much better lead than it had. The practical
+consequence is unchanged — look adapters up by address, never by index — and
+any *other* socket open on a dongle that gets USB-reset dies with it, which is
+what makes a second session immediately after a first one fail unless the
+indices are looked up again.
 
 ## Commands the controller refused
 
