@@ -52,6 +52,36 @@ iOS reads Device Name and Appearance the moment it connects."
                                         :properties '(:indicate)
                                         :value (ble:service-changed-range)
                                         :security :encrypted)
+    ;; SAY THAT WE DO EATT. Without this the phone has no way to know: EATT is
+    ;; not advertised and there is nothing in the connection to infer it from.
+    ;; Bit 0 of Server Supported Features is the whole mechanism, and a
+    ;; conforming client that cannot read it will never try the PSM -- which
+    ;; is exactly what the first run of this test showed. Pairing succeeded,
+    ;; GATT was browsed, and no bearer was ever asked for, because we had
+    ;; implemented EATT without telling anybody.
+    (ble:gatt-add-characteristic server
+                                 :uuid ble:+char-server-supported-features+
+                                 :properties '(:read)
+                                 :value (vector ble:+server-feature-eatt+))
+    ;; And let the phone declare its own. Bit 1 is the client's EATT support;
+    ;; iOS writes this when it has something to say, and refusing the write
+    ;; would be a poor way to start.
+    (ble:gatt-add-characteristic server
+                                 :uuid ble:+char-client-supported-features+
+                                 :properties '(:read :write)
+                                 :value (vector 0)
+                                 :on-write
+                                 (lambda (s a v)
+                                   (declare (ignore s a))
+                                   (format t "~&phone's client features: ~
+                                              ~{~2,'0X~} ~:[~;(it says it ~
+                                              does EATT)~]~%"
+                                           (coerce v 'list)
+                                           (and (plusp (length v))
+                                                (logtest ble:+client-feature-eatt+
+                                                         (aref v 0))))
+                                   (force-output)
+                                   nil))
     (ble:gatt-add-service server ble:+service-device-information+)
     (ble:gatt-add-characteristic server :uuid ble:+char-manufacturer-name+
                                         :properties '(:read) :value "lispnik")

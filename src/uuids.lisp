@@ -49,6 +49,21 @@
 (defconstant +char-appearance+            #x2A01)
 ;; Generic Attribute
 (defconstant +char-service-changed+       #x2A05)
+;; How a client finds out what the server can do beyond plain GATT. Bit 0 of
+;; Server Supported Features is EATT: a client that cannot read this
+;; characteristic has no reason to believe Enhanced ATT bearers are on offer,
+;; and a conforming one will not try the PSM. Implementing the L2CAP side
+;; without publishing this makes EATT look broken when it is merely unadvertised.
+(defconstant +char-client-supported-features+ #x2B29)
+(defconstant +char-database-hash+             #x2B2A)
+(defconstant +char-server-supported-features+ #x2B3A)
+(defconstant +server-feature-eatt+ #x01
+  "Bit 0 of Server Supported Features: this server accepts Enhanced ATT
+bearers.")
+(defconstant +client-feature-robust-caching+ #x01)
+(defconstant +client-feature-eatt+           #x02
+  "Bit 1 of Client Supported Features: the CLIENT declares it can use
+Enhanced ATT bearers. Written by the peer, not by us.")
 ;; Device Information
 (defconstant +char-manufacturer-name+     #x2A29)
 (defconstant +char-model-number+          #x2A24)

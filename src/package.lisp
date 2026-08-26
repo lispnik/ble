@@ -67,6 +67,12 @@
    #:+char-device-name+
    #:+char-appearance+
    #:+char-service-changed+
+   #:+char-client-supported-features+
+   #:+char-database-hash+
+   #:+char-server-supported-features+
+   #:+server-feature-eatt+
+   #:+client-feature-robust-caching+
+   #:+client-feature-eatt+
    #:+char-manufacturer-name+
    #:+char-model-number+
    #:+char-serial-number+

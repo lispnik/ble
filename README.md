@@ -1024,6 +1024,36 @@ about why: both radios run this library, so any misreading of the
 specification is shared by both ends and a green run says only that we are
 self-consistent.
 
+### Tested against an iPhone, which declined
+
+Offered to an iPhone through `tools/pair-with-phone/`, with the PSM open and
+Server Supported Features (`0x2B3A`) bit 0 set, over a paired and encrypted
+link. **The phone never asked for a bearer.** It discovered the
+characteristics, did not read `0x2B3A`, never wrote its own Client Supported
+Features, and never touched the PSM — across a first pairing, a fresh pairing
+after forgetting the device, and a reconnection from cache.
+
+Our side was eliminated rather than assumed: the attribute table has `0x2B3A`
+at handle 11 with the EATT bit set and readable, and the same code passes
+16/16 over the air between two dongles. The first attempt did find a real
+omission — the characteristic was missing entirely, so a conforming client had
+no way to learn EATT was on offer and correctly did not try — but adding it
+did not change the outcome.
+
+So EATT interop is **untested, not disproved**. What the same session did
+confirm is worth recording, because it is the same kind of evidence and it
+came out positive: LE Secure Connections pairing with matching `Ea`, LTK and
+IRK exchange, bond storage, and — on reconnection behind a different
+resolvable private address — resolution back to the bonded identity and
+re-encryption from the stored LTK, with no re-pairing. Those are Apple's
+implementation agreeing with ours, which is exactly what the two-radio tests
+cannot show.
+
+Android 12 and later are reported to be readier to open EATT and are the
+obvious next probe. Apple's PacketLogger, with the Bluetooth debug profile
+installed on the phone, would show iOS's side of the decision directly rather
+than leaving it to be inferred from what did not arrive.
+
 Two things are specifically unconfirmed. The simultaneous-open tie-break —
 when both peers ask for bearers at once, somebody must yield, and this yields
 by role — is written from reasoning rather than from a shipping
