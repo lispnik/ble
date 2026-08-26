@@ -975,12 +975,31 @@ every time, exactly twice, once per end. Disconnecting before releasing the
 adapter does not prevent it. Neither does resetting the controller ourselves
 first, with a timeout longer than the kernel's.
 
-So it appears to be the controller failing to answer the kernel's shutdown
-Reset within its two-second window after an encrypted link, and btusb forcing
-a USB reset to recover. The practical consequences are the index churn above,
-and that any *other* socket open on that dongle dies with it — which is what
-makes a second paired session immediately after a first one fail unless the
-indices are looked up again.
+The kernel source settles it. `btrtl_shutdown_realtek` (`drivers/bluetooth/
+btrtl.c`) sends an HCI Reset on *every* close — its comment says the vendor
+driver requires it or the firmware crashes — and allows `HCI_CMD_TIMEOUT`,
+which is two seconds (`include/net/bluetooth/hci.h`). When that expires,
+`hci_cmd_timeout` (`net/bluetooth/hci_core.c`) calls `hdev->reset`, which for
+these parts is `btusb_rtl_reset`: the USB reset above.
+
+Three things follow, and all three were checked rather than assumed:
+
+- It is **unavoidable from userspace**. `hdev->shutdown` is assigned
+  unconditionally for Realtek devices in `btusb.c`, there is no quirk to skip
+  it, and `hci_dev_close_sync` deliberately clears the user-channel flag
+  before running it so the kernel *can* send commands during cleanup.
+- The kernel **cannot** tear our links down first. In user channel it has no
+  `hci_conn` objects for connections userspace made, so the Reset arrives with
+  whatever we left running still running.
+- But tidying up first does not help either. Disconnecting before release,
+  waiting for the Disconnection Complete before release, and resetting the
+  controller ourselves with a longer timeout were each tried and each still
+  produced exactly two timeouts per session.
+
+The practical consequences are the index churn above, and that any *other*
+socket open on that dongle dies with it — which is what makes a second paired
+session immediately after a first one fail unless the indices are looked up
+again. Non-Realtek adapters would be the test of the attribution.
 
 ## Commands the controller refused
 

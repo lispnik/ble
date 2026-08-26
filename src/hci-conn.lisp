@@ -621,9 +621,32 @@ own GATT over an adapter we own starts here."
           (ignore-errors (close-hci-user-socket sock))
           (error c))))))
 
+(defparameter *disconnect-timeout-ms* 2000
+  "How long HCI-CONN-CLOSE waits for the link to actually go down.")
+
 (defun hci-conn-close (conn)
-  "Disconnect and hand the adapter back to the kernel."
+  "Disconnect, wait for the link to be gone, and hand the adapter back.
+
+The waiting is the point, and it is not politeness. Releasing a user-channel
+socket makes the kernel run hdev->shutdown, and for these Realtek parts that
+is btrtl_shutdown_realtek, which sends an HCI Reset and gives the controller
+HCI_CMD_TIMEOUT -- two seconds -- to answer. The kernel cannot tear our
+connections down first: in user channel it has no HCI-CONN objects for links
+userspace made, so it goes straight to the Reset with whatever we left
+running still running.
+
+Sending Disconnect and closing in the same breath therefore hands the
+controller a Reset while a link is still tearing down. This waits for the
+Disconnection Complete before letting go."
   (when (and conn (hci-conn-sock conn))
     (hci-disconnect (hci-conn-sock conn) (hci-conn-handle conn))
+    (let ((deadline (+ (get-internal-real-time)
+                       (round (* *disconnect-timeout-ms*
+                                 internal-time-units-per-second)
+                              1000))))
+      (loop until (> (get-internal-real-time) deadline)
+            ;; HCI-PUMP reports the Disconnection Complete as :DISCONNECTED,
+            ;; and files everything else where it belongs on the way past.
+            until (eq :disconnected (ignore-errors (hci-pump conn 100)))))
     (close-hci-user-socket (hci-conn-sock conn))
     (setf (hci-conn-sock conn) nil)))

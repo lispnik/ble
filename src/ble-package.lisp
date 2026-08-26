@@ -205,6 +205,7 @@
           hci-conn-handle
           hci-conn-sock
           hci-conn-close
+          *disconnect-timeout-ms*
           hci-pump
           hci-take-event
           hci-drop-events
