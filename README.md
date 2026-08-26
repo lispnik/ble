@@ -99,6 +99,40 @@ And it is encrypted: the REPL's characteristics require a paired link by
 default, because an unauthenticated remote evaluator is precisely a remote
 shell. `#.` is refused at read time for the same reason — see step 11.
 
+### A Bluetooth device that is also a serial port
+
+`examples/nus-pty/` opens a pseudo-terminal and pumps bytes between it and a
+Nordic UART peripheral. One terminal runs the bridge:
+
+```
+/dev/pts/0 is now D9:47:7B:29:36:7E
+(screen /dev/pts/0, or point anything expecting a serial port at it)
+37 octet(s) out, 63 in
+```
+
+Another drives that node with nothing but `printf` and `dd` — no Lisp, no
+Bluetooth library, no idea a radio is involved:
+
+```
+/dev/pts/0 is a Bluetooth device. Talking to it with printf and dd:
+  -> help                         <- commands: help, time
+  -> time                         <- 23:27:37
+  -> echo through a device node   <- through a devicno such command: e n
+```
+
+`time` is right. The other two are the peripheral's limits showing through,
+and they are worth looking at, because a transparent bridge is exactly what
+exposes them: `help`'s reply is **truncated at a 23-octet MTU**, because
+`gatt-notify` cuts to the MTU rather than chunking; and the 27-octet line
+arrived as **two ATT writes**, each of which `examples/nordic-uart/` answers
+as a separate command — the caveat its own docstring gives, seen from the
+outside.
+
+Neither is the bridge misbehaving. A serial port has no message boundaries
+either, and a device that needs them has to impose them. This is the honest
+answer to wanting the Serial Port Profile: SPP is a BR/EDR protocol this
+library does not speak, and what people want it *for* is a device node.
+
 ### Growing a thermometer while somebody is connected
 
 Step 4 above adds nothing to GATT. This does. `(lisp-repl-client:grow-a-thermometer

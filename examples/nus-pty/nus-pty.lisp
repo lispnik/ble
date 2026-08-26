@@ -187,8 +187,12 @@ shape."
            ;; trip, so the interval matters more than the throughput.
            (ble:hci-connection-update (ble:nus-fd nus)
                                       :min-interval-ms 15 :max-interval-ms 30)
+           ;; ~2:* backs up TWO arguments, to the device name. ~:* backs up
+           ;; one, which is the MAC, and printed `screen AA:BB:...' -- advice
+           ;; that cannot work, in the one line whose entire job is telling
+           ;; somebody what to type.
            (format t "~&~A is now ~A~%~
-                      (screen ~:*~A, or point anything expecting a serial ~
+                      (screen ~2:*~A, or point anything expecting a serial ~
                        port at it)~%"
                    (pty-name pty) mac)
            (force-output)
