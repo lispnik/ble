@@ -132,19 +132,37 @@ iOS reads Device Name and Appearance the moment it connects."
               *name* dev (ble:format-mac (ble:peripheral-pairing-local-addr pairing))
               (ble:load-bonds *bond-file*) minutes)
       (force-output)
-      (ble:serve-peripheral
-       server sock :seconds (* 60 minutes)
-       :pairing pairing
-       :on-connect (lambda (conn peer ptype)
-                     (declare (ignore conn))
-                     (report-connect peer ptype))
-       :on-disconnect (lambda (conn)
-                        (declare (ignore conn))
-                        (format t "~&phone disconnected; advertising again~%")
-                        (force-output))
-       ;; No ON-TICK at all any more: pairing is the library's, and this
-       ;; harness has nothing else to do while it happens.
-       ))))
+      (let ((bearers 0))
+        (ble:serve-peripheral
+         server sock :seconds (* 60 minutes)
+         :pairing pairing
+         ;; The other half of the interop question. A phone's Bluetooth stack
+         ;; decides for itself whether to open Enhanced ATT bearers -- no app
+         ;; asks for them -- so offering the PSM and watching is the whole
+         ;; test. iOS will only try it over an encrypted link, which is why
+         ;; this belongs in the tool that pairs rather than the bench harness
+         ;; that does not.
+         :eatt t
+         :on-connect (lambda (conn peer ptype)
+                       (declare (ignore conn))
+                       (setf bearers 0)
+                       (report-connect peer ptype))
+         :on-disconnect (lambda (conn)
+                          (declare (ignore conn))
+                          (format t "~&phone disconnected; advertising again~%")
+                          (force-output))
+         ;; Report bearers as they appear. Counted rather than hooked because
+         ;; the interesting event is `the phone decided to open one', and that
+         ;; happens inside the library with nothing to call back to.
+         :on-tick (lambda (conn request)
+                    (declare (ignore request))
+                    (let ((n (length (ble:hci-conn-eatt-bearers conn))))
+                      (when (/= n bearers)
+                        (format t "~&EATT: ~D bearer(s) open~:[~; -- the phone ~
+                                   asked for them, which is the answer~]~%"
+                                n (plusp n))
+                        (force-output)
+                        (setf bearers n)))))))))
 
 (run)
 (sb-ext:exit)
