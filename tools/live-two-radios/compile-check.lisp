@@ -71,5 +71,10 @@
       (note "build-server was not defined")))
 
 (check-file "tools/live-two-radios/central.lisp")
+;; The single-purpose clients too. They drive radios and so are only compiled
+;; here, never run -- but a harness that cannot be exercised is a harness that
+;; quietly stops compiling, which is the whole reason this file exists.
+(check-file "tools/live-two-radios/read-multiple-variable.lisp")
+(check-file "tools/live-two-radios/eatt.lisp")
 (format t "~&~%COMPILE CHECK: ~:[clean~;~:*~D problem(s)~]~%" *problems*)
 (sb-ext:exit :code (if (zerop *problems*) 0 1))

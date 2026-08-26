@@ -154,6 +154,11 @@
       (format t "~&[peripheral] advertising as TWOHAND~%") (force-output)
       (ble:serve-peripheral
        (sensor-server s) sock :seconds seconds :tick-ms 100
+       ;; EATT=1 turns on Enhanced ATT bearers. :INSECURE because this
+       ;; harness does not pair -- the encryption gate is real and is covered
+       ;; by the unit tests; what the radios are here to prove is that the
+       ;; bearers open and carry ATT.
+       :eatt (when (plusp (env-int "EATT" 0)) :insecure)
        :accept-timeout-ms (* 1000 (env-int "PERIPH_WAIT" 90))
        :on-connect (lambda (conn peer ptype) (on-connect s conn peer ptype))
        :on-tick (lambda (conn request) (on-tick s conn request))

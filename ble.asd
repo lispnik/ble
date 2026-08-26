@@ -49,6 +49,10 @@
                              (:file "conn-params" :depends-on ("hci-conn"))
                              (:file "l2cap-signalling" :depends-on ("conn-params"))
                              (:file "l2cap-coc" :depends-on ("l2cap-signalling"))
+                             ;; Enhanced ATT bearers: credit-based channels
+                             ;; from l2cap-coc, carrying ATT for gatt-server.
+                             ;; Before peripheral, which serves them.
+                             (:file "eatt" :depends-on ("l2cap-coc" "gatt-server"))
                              (:file "smp-crypto" :depends-on ("ble-package"))
                              (:file "smp" :depends-on ("smp-crypto" "hci-conn"))
                              (:file "bonds" :depends-on ("smp"))
@@ -59,6 +63,7 @@
                              (:file "peripheral" :depends-on ("gatt-server"
                                                               "hci-conn"
                                                               "advertiser"
+                                                              "eatt"
                                                               "smp" "bonds"))
                              (:file "nus"        :depends-on ("att" "hci-conn"))
                              (:file "teardown"   :depends-on ("hci-conn"))

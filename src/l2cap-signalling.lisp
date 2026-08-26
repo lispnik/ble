@@ -26,6 +26,13 @@
   "Called with (CONN FRAME) before the parameter-update handling, returning T
 if it claimed the frame. Set by src/l2cap-coc.lisp.")
 
+(defvar *l2cap-eatt-signalling-handler* nil
+  "The same contract, consulted after the CoC handler. Set by src/eatt.lisp.
+
+Two hooks rather than one list because the order is meaningful and worth being
+able to read: connection-oriented channels answer first, Enhanced ATT bearers
+second, and neither file has to know the other exists.")
+
 (defvar *l2cap-sig-ident* 0
   "Rolling identifier for outgoing signalling commands. A response carries the
 identifier of the request it answers, which is how the two are paired.")
@@ -43,8 +50,21 @@ identifier of the request it answers, which is how the two are paired.")
     (replace pdu data :start1 4)
     pdu))
 
+(defvar *l2cap-sig-sink* nil
+  "When bound to a function, it is called with (CODE IDENT DATA) and nothing
+is transmitted.
+
+A deliberately narrow test seam. Signalling is the half of L2CAP that decides
+things -- which channels open and at what MTU, whether a reconfiguration is
+allowed, what a refusal says -- and every one of those decisions used to be
+reachable only with two radios, because it ends in a write to a socket. The
+transport is worth proving over the air; the decisions are not, and this lets
+them be checked on a machine with no Bluetooth at all.")
+
 (defun %l2cap-send-sig (conn code ident data)
-  (hci-acl-send-l2cap conn +l2cap-sig-cid+ (%l2cap-sig-pdu code ident data)))
+  (if *l2cap-sig-sink*
+      (funcall *l2cap-sig-sink* code ident (coerce-octets data))
+      (hci-acl-send-l2cap conn +l2cap-sig-cid+ (%l2cap-sig-pdu code ident data))))
 
 (defun parse-conn-param-request (frame)
   "The four parameters out of a Connection Parameter Update Request, in
@@ -111,9 +131,12 @@ for something, and 'not understood' is an answer it can act on."
           while frame
           do (incf handled)
              (let* ((code (aref frame 0))
-                    (claim (and *l2cap-coc-signalling-handler*
-                                (funcall *l2cap-coc-signalling-handler*
-                                         conn frame))))
+                    (claim (or (and *l2cap-coc-signalling-handler*
+                                    (funcall *l2cap-coc-signalling-handler*
+                                             conn frame))
+                               (and *l2cap-eatt-signalling-handler*
+                                    (funcall *l2cap-eatt-signalling-handler*
+                                             conn frame)))))
                (cond
                  ;; A response somebody else is blocked on. Draining it here
                  ;; would leave them waiting out a timeout for a frame that

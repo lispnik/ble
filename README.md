@@ -851,8 +851,11 @@ for it — as well as with the 5.4 Barrot as the client. What was blocking it
 was that nobody had written it, which is a different and much cheaper problem
 than needing new radios.
 
-EATT is the same shape of job and equally unblocked by hardware; it is simply
-a bigger one.
+EATT is now implemented too, and likewise runs between the 5.1 dongles:
+`tools/live-two-radios/eatt.lisp` passes 16/16 there, opening three bearers,
+serving GATT on each, and raising their MTU from 128 to 512 in one
+reconfiguration. See "Enhanced ATT bearers" below for what that does and does
+not demonstrate.
 
 `compile-check.lisp` beside them needs no hardware at all: it loads every
 definition, compiles the forms that drive the radios without running them, and
@@ -971,6 +974,69 @@ cannot hand over more per buffer whatever the air PDU becomes.
 The bulk-transfer example clients ask for a shorter interval; the sensor
 examples deliberately do not, because a battery peripheral notifying once a
 second wants the opposite trade.
+
+## Enhanced ATT bearers
+
+Ordinary ATT gets one channel per connection, fixed CID `0x0004`, and one
+outstanding request on it. A slow read blocks everything behind it, including
+notifications, because there is nowhere else for them to go. EATT gives ATT
+several channels instead, each carrying its own transaction.
+
+```lisp
+;; Server: off by default, so nothing that worked before changes.
+(ble:serve-peripheral server sock :eatt t)
+
+;; Client:
+(let ((bearers (ble:eatt-connect conn :count 3 :mtu 128)))
+  (ble:att-read-value (first bearers) handle)      ; ATT, on a bearer
+  (ble:eatt-reconfigure bearers :mtu 512)          ; wider, once open
+  (mapc #'ble:eatt-close bearers))
+```
+
+**What it buys, and what it does not.** Interop, and independence: Android 12
+and recent iOS open EATT when they see the PSM, and a notification can go out
+while a long read is in flight. It does **not** buy throughput. This library
+is single threaded, so the bearers are independent, not parallel — nothing
+here runs at the same time as anything else, and a benchmark will not show a
+bearer count in it.
+
+**It needs no 5.2 hardware.** EATT is L2CAP, which is host layer: the frames
+are ACL payload and the controller never looks inside them. The live test runs
+between two Bluetooth 5.1 dongles.
+
+Three things differ from the fixed channel and are worth knowing:
+
+- **Each bearer has its own MTU**, settled by L2CAP when it opens, with a
+  floor of 64 rather than 23. `gatt-server-mtu` therefore stops being the
+  single number that sizes every response; `*att-bearer-mtu*` is bound while a
+  bearer is served and takes precedence.
+- **Exchange MTU is prohibited** on a bearer, and refused in both directions —
+  the client will not send one, the server answers Request Not Supported.
+- **Bearers are refused until the link is encrypted.** `:eatt :insecure` lifts
+  that for a bench, and is spelled that way so it cannot happen by accident.
+
+### What the tests here do not prove
+
+The unit tests cover the decisions — which channels open, at what MTU, what a
+refusal says, the reconfiguration rules — and the live test covers the
+transport. Neither covers **interoperability**, and it is worth being exact
+about why: both radios run this library, so any misreading of the
+specification is shared by both ends and a green run says only that we are
+self-consistent.
+
+Two things are specifically unconfirmed. The simultaneous-open tie-break —
+when both peers ask for bearers at once, somebody must yield, and this yields
+by role — is written from reasoning rather than from a shipping
+implementation, because Linux implements the credit-based channels underneath
+EATT without implementing EATT itself. And Reconfigure initiation has only
+ever been answered by our own responder. A phone would settle both in minutes
+and is the obvious next step.
+
+The wire formats themselves are not guesswork: they were read off
+`include/net/bluetooth/l2cap.h`. That mattered, because Reconfigure Request
+carries the **sender's** source CIDs, the opposite convention from
+Disconnection Request, and getting it backwards makes every channel look
+unknown while looking entirely reasonable in the code.
 
 ## A controller quirk worth knowing about
 

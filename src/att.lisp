@@ -255,6 +255,10 @@ behaviour is visible at all."
   "Send one ATT PDU over CHAN."
   (cond
     ((att-test-channel-p chan) (%test-channel-send chan pdu))
+    ;; An Enhanced ATT bearer: one PDU is one credit-based SDU, which is the
+    ;; whole reason the two fit together without a framing layer in between.
+    ;; ATT wants message boundaries; a credit-based SDU already is one.
+    ((eatt-bearer-p chan) (l2cap-coc-send (eatt-bearer-coc chan) pdu))
     ((integerp chan)
      (let* ((pdu (coerce-octets pdu))
             (n (length pdu)))
@@ -270,6 +274,8 @@ transports -- the kernel-socket path used to block indefinitely, which meant
 a caller could not stop on a deadline."
   (cond
     ((att-test-channel-p chan) (pop (att-test-channel-inbox chan)))
+    ((eatt-bearer-p chan)
+     (l2cap-coc-recv (eatt-bearer-coc chan) :timeout-ms timeout-ms))
     ((integerp chan)
      (when (fd-readable-p chan timeout-ms)
        (cffi:with-foreign-object (buf :unsigned-char *att-buffer-size*)
@@ -637,7 +643,18 @@ number cannot inherit the previous peer's number."
 against CHAN so ATT-MTU can answer for it later.
 
 CLIENT-MTU defaults to what we advertise, so callers with no opinion -- which
-is most of them -- do not have to have one."
+is most of them -- do not have to have one.
+
+Signals on an Enhanced ATT bearer rather than sending. The PDU is prohibited
+there: an enhanced bearer's MTU was settled by L2CAP when the channel opened
+and cannot be renegotiated, so sending this would be a protocol violation
+that a strict peer answers with an error and a lax one answers with a number
+that does not take effect -- the second being much the worse outcome, since
+everything afterwards is sized by a value the peer is not honouring."
+  (when (eatt-bearer-p chan)
+    (error "Exchange MTU is prohibited on an Enhanced ATT bearer; its MTU is ~
+            ~D, fixed by L2CAP when the bearer opened"
+           (eatt-bearer-mtu chan)))
   (let ((req (make-octets 3)))
     (setf (aref req 0) +att-exchange-mtu-req+)
     (u16le-put req 1 client-mtu)

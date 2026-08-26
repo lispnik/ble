@@ -44,7 +44,8 @@ peripheral nobody can connect to."
           (return
             (values (make-hci-conn :sock sock
                                    :handle (u16-le pkt 5)
-                                   :acl-len (hci-socket-acl-len sock))
+                                   :acl-len (hci-socket-acl-len sock)
+                                   :role :peripheral)
                     (subseq pkt 9 15)
                     (if (= 1 (aref pkt 8)) :random :public))))))))
 
@@ -206,7 +207,7 @@ socket, because HCI-PUMP is the only reader and a second one would race it."
         (dotimes (i 20) (hci-pump conn 100))))))
 
 (defun serve-peripheral (server sock &key on-connect on-tick on-disconnect
-                                          pairing
+                                          pairing eatt
                                           (accept-timeout-ms 60000)
                                           seconds (tick-ms 50))
   "Advertise, accept a central, serve GATT to it, and go back to advertising
@@ -220,6 +221,19 @@ The hooks are where a peripheral does its own work:
                  arrived, so a peripheral can see what it is being asked for
                  without reading the socket itself.
   ON-DISCONNECT  (conn) after the peer leaves, before advertising resumes
+
+EATT, when true, also accepts Enhanced ATT bearers and serves GATT on them --
+which is what Android 12 and recent iOS ask for when they see the PSM. It
+defaults off, so nothing that worked before behaves differently: a peer that
+tries EATT and finds nobody listening falls back to the fixed ATT channel, so
+declining costs a round trip and nothing else. Bearers are refused until the
+link is encrypted, since handing out the whole attribute database on a
+channel that was never secured is not something to do by default.
+
+:EATT :INSECURE lifts that requirement, and is spelled that way so it cannot
+be done by accident or in passing. It exists for a bench with two radios and
+nothing else in range, where pairing is not what is being tested. On anything
+carrying real data it is the wrong answer.
 
 Reads only through the connection once one exists. Polling the socket
 separately as well makes two readers race for the same packets, and whichever
@@ -257,6 +271,13 @@ loses simply never sees them."
                   (when pairing
                     (setf (gatt-server-encrypted server) nil)
                     (%pairing-reset pairing peer ptype))
+                  ;; Per connection, not once for the socket: bearers belong
+                  ;; to a link and do not outlive it.
+                  (when eatt
+                    (eatt-listen new
+                                 :encrypted-p
+                                 (unless (eq eatt :insecure)
+                                   (lambda () (gatt-server-encrypted server)))))
                   ;; The controller stopped advertising when it accepted; it
                   ;; stays stopped until we say otherwise.
                   (when on-connect (funcall on-connect conn peer ptype)))))
@@ -265,6 +286,7 @@ loses simply never sees them."
               (let ((r (hci-pump conn tick-ms)))
                 (if (eq r :disconnected)
                     (progn
+                      (when eatt (eatt-close-all conn))
                       (when pairing (%pairing-disconnected pairing conn))
                       (when on-disconnect (funcall on-disconnect conn))
                       (setf conn nil))
@@ -279,6 +301,12 @@ loses simply never sees them."
                             ;; characteristics require encryption wants the
                             ;; link secured before it is asked to do work.
                             (when pairing (%drive-pairing pairing server conn))
+                            ;; Answer anything waiting on a bearer. Never
+                            ;; blocks, so an idle bearer cannot starve the
+                            ;; fixed channel or any other bearer.
+                            (when eatt
+                              (let ((n (eatt-serve server conn)))
+                                (when (and (plusp n) (null op)) (setf op :eatt))))
                             (when on-tick (funcall on-tick conn op))))))))))
       ;; Disconnect before the adapter goes back, and in this order. Releasing
       ;; a user-channel socket with a link still up leaves the controller

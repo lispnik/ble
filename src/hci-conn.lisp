@@ -178,9 +178,21 @@ same for the L2CAP signalling channel, whose frames used to be dropped on the
 floor along with every other non-ATT CID."
   sock handle acl-len (rxbuf (make-octets 0)) (pending '()) (sig-pending '())
   (sig-results '())
+  ;; Which end of the link we are. Set where the connection is made: we are
+  ;; the Central when we initiated it, the Peripheral when we accepted one.
+  ;; Recorded rather than passed around because two protocols need it and one
+  ;; of them cannot be told -- EATT breaks a simultaneous-open tie by role,
+  ;; and SMP already takes a :ROLE argument its caller has to supply by hand.
+  (role nil)
   ;; Connection-oriented channels, keyed by the CID we allocated for each,
   ;; plus the SPSMs we accept and the channels a peer has opened to them.
   (coc-channels '()) (coc-listeners '()) (coc-incoming '()) (coc-next-cid #x0040)
+  ;; Enhanced ATT bearers. They live in COC-CHANNELS as well -- that is what
+  ;; routes frames to them -- and are listed again here because serving needs
+  ;; to walk the ones carrying ATT without walking every CoC on the link.
+  ;; EATT-PENDING holds the ident of a connection request we have outstanding,
+  ;; which is how a collision is noticed at all.
+  (eatt-bearers '()) (eatt-incoming '()) (eatt-listener nil) (eatt-pending nil)
   (smp-pending '())
   ;; HCI events nobody has claimed yet. Events are not addressed to a
   ;; particular reader, so a reader that is not looking for one must not be
@@ -616,7 +628,8 @@ own GATT over an adapter we own starts here."
                          :init-phys init-phys :command command
                          :timeout-ms (round (* 1000 timeout)) :retries retries)))
             (register-att-channel
-             (make-hci-conn :sock sock :handle handle :acl-len acl-len)))
+             (make-hci-conn :sock sock :handle handle :acl-len acl-len
+                            :role :central)))
         (error (c)
           (ignore-errors (close-hci-user-socket sock))
           (error c))))))

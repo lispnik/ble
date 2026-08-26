@@ -300,6 +300,26 @@
           hci-conn-sig-results
           l2cap-conn-param-result
           *l2cap-signalling-handler*
+          ;; Enhanced ATT bearers (src/eatt.lisp)
+          eatt-bearer
+          eatt-bearer-p
+          eatt-bearer-mtu
+          eatt-bearer-open-p
+          eatt-connect
+          eatt-listen
+          eatt-accept
+          eatt-reconfigure
+          eatt-close
+          eatt-close-all
+          eatt-serve
+          eatt-pending-pdu-p
+          hci-conn-eatt-bearers
+          hci-conn-role
+          +psm-eatt+
+          *eatt-default-mtu*
+          *eatt-default-mps*
+          *eatt-default-bearers*
+          *att-bearer-mtu*
           ;; Connection-oriented channels (src/l2cap-coc.lisp)
           l2cap-coc
           l2cap-coc-p

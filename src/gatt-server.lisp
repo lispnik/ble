@@ -223,6 +223,22 @@ back-reference to correct the order later."
 (defconstant +att-err-read-not-permitted+   #x02)
 (defconstant +att-err-write-not-permitted+  #x03)
 (defconstant +att-err-request-not-supported+ #x06)
+
+(defvar *att-bearer-mtu* nil
+  "The MTU of the Enhanced ATT bearer currently being served, or NIL on the
+fixed channel.
+
+A server has one MTU, negotiated by Exchange MTU, and every response is sized
+by it. An enhanced bearer has its own, settled by L2CAP when the channel
+opened, and a link can have several at once with different values -- so
+`the server's MTU' stops being a single number the moment EATT is in play.
+Bound around serving rather than threaded through every handler: the handlers
+size responses in eight places and none of them care WHY the number is what
+it is.")
+
+(defun %response-mtu (server)
+  "The MTU responses must be sized by right now."
+  (or *att-bearer-mtu* (gatt-server-mtu server)))
 (defconstant +att-err-unsupported-group-type+ #x10)
 (defconstant +att-err-insufficient-authentication+ #x05)
 (defconstant +att-err-prepare-queue-full+   #x09)
@@ -280,7 +296,7 @@ garbage."
         (let* ((size (length (gatt-attribute-uuid (first attrs))))
                (fmt (if (= size 2) 1 2))
                (each (+ 2 size))
-               (room (floor (- (gatt-server-mtu server) 2) each))
+               (room (floor (- (%response-mtu server) 2) each))
                (take (loop for a in attrs
                            while (and (< (length out) room)
                                       (= (length (gatt-attribute-uuid a)) size))
@@ -346,9 +362,9 @@ first that differs."
     (if (null attrs)
         (%send-att-error chan +att-read-by-type-req+ start +att-err-attr-not-found+)
         (let* ((first-value (gatt-attribute-read server (first attrs)))
-               (vlen (min (length first-value) (- (gatt-server-mtu server) 4)))
+               (vlen (min (length first-value) (- (%response-mtu server) 4)))
                (each (+ 2 vlen))
-               (room (floor (- (gatt-server-mtu server) 2) each))
+               (room (floor (- (%response-mtu server) 2) each))
                (take (loop for a in attrs
                            for v = (gatt-attribute-read server a)
                            while (and (< (length out) room) (= (length v) vlen))
@@ -383,7 +399,7 @@ than answered emptily, or a client cannot tell 'none' from 'not that kind'."
                            +att-err-attr-not-found+)
           (let* ((ulen (length (gatt-service-entry-uuid (first hits))))
                  (each (+ 4 ulen))
-                 (room (floor (- (gatt-server-mtu server) 2) each))
+                 (room (floor (- (%response-mtu server) 2) each))
                  (take (loop for s in hits
                              while (and (< (length out) room)
                                         (= (length (gatt-service-entry-uuid s)) ulen))
@@ -415,7 +431,7 @@ than answered emptily, or a client cannot tell 'none' from 'not that kind'."
                (%send-att-error chan opcode handle +att-err-invalid-offset+)
                (let* ((chunk (subseq value offset
                                      (min (length value)
-                                          (+ offset (- (gatt-server-mtu server) 1)))))
+                                          (+ offset (- (%response-mtu server) 1)))))
                       (rsp (make-octets (1+ (length chunk)))))
                  (setf (aref rsp 0) (if blob +att-read-blob-rsp+ +att-read-rsp+))
                  (replace rsp chunk :start1 1)
@@ -446,7 +462,7 @@ than answered emptily, or a client cannot tell 'none' from 'not that kind'."
                      (t (push (gatt-attribute-read server attr) values)))))
     (let* ((blob (apply #'concatenate '(simple-array (unsigned-byte 8) (*))
                         (nreverse values)))
-           (chunk (subseq blob 0 (min (length blob) (- (gatt-server-mtu server) 1))))
+           (chunk (subseq blob 0 (min (length blob) (- (%response-mtu server) 1))))
            (rsp (make-octets (1+ (length chunk)))))
       (setf (aref rsp 0) +att-read-multiple-rsp+)
       (replace rsp chunk :start1 1)
@@ -488,7 +504,7 @@ opcode cannot report."
                                          (u16-le pdu off)
                                          (%security-shortfall server attr))))
                      (t (push (gatt-attribute-read server attr) values)))))
-    (let* ((room (- (gatt-server-mtu server) 1))
+    (let* ((room (- (%response-mtu server) 1))
            (body (make-octets room))
            (n 0))
       (dolist (v (nreverse values))
@@ -674,7 +690,19 @@ Response that says so."
       (macrolet ((need (n) `(unless (>= (length pdu) ,n)
                               (return-from gatt-serve-pdu nil))))
         (cond
-          ((= op +att-exchange-mtu-req+) (need 3) (%handle-exchange-mtu server chan pdu) op)
+          ((= op +att-exchange-mtu-req+)
+           (need 3)
+           ;; Prohibited on an enhanced bearer: its MTU came from L2CAP and
+           ;; there is nothing to negotiate. Refused rather than answered,
+           ;; because answering would tell the peer we had renegotiated a
+           ;; number that in fact cannot change. *ATT-BEARER-MTU* is the
+           ;; signal because it is bound exactly when a bearer is being
+           ;; served, and testing it does not make this file depend on
+           ;; eatt.lisp, which loads after it.
+           (if *att-bearer-mtu*
+               (%send-att-error chan op 0 +att-err-request-not-supported+)
+               (%handle-exchange-mtu server chan pdu))
+           op)
           ((= op +att-find-info-req+) (need 5) (%handle-find-info server chan pdu) op)
           ((= op +att-find-by-type-value-req+) (need 7)
            (%handle-find-by-type-value server chan pdu) op)
@@ -729,7 +757,7 @@ client's handling of unsolicited traffic."
   (let ((cccd (or cccd-handle (1+ value-handle))))
     (when (or force (gatt-subscribed-p server cccd :indications indications))
       (let* ((value (%as-value value))
-             (room (max 0 (- (gatt-server-mtu server) 3)))
+             (room (max 0 (- (%response-mtu server) 3)))
              (value (if (> (length value) room) (subseq value 0 room) value))
              (pdu (make-octets (+ 3 (length value)))))
         (setf (aref pdu 0) (if indications +att-handle-value-ind+

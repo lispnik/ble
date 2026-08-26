@@ -2118,3 +2118,315 @@ are: a constant, or a short read leaving zeros."
                        (ble::hci-socket-pending sock))
                "the event read before the refusal is still queued"))
       (%test-close ours) (%test-close theirs))))
+
+;;; --- Enhanced ATT bearers ----------------------------------------------
+;;;
+;;; The decisions, without a radio. Every one of these ends in a signalling
+;;; frame, so *L2CAP-SIG-SINK* collects them instead of transmitting: what is
+;;; being checked is what the responder DECIDES -- which channels it opens, at
+;;; what MTU, what it says when it refuses -- and none of that needs an
+;;; antenna. The transport underneath is credit-based framing already covered
+;;; above and proved over two radios.
+
+(defun eatt-fixture (&key (role :peripheral) listener (max-bearers 5)
+                          encrypted-p (mtu 517) (mps 247))
+  "A connection with no socket, optionally listening for bearers."
+  (let ((conn (ble::make-hci-conn :handle 1 :acl-len 27 :role role)))
+    (when listener
+      (ble:eatt-listen conn :mtu mtu :mps mps :max-bearers max-bearers
+                            :encrypted-p encrypted-p))
+    conn))
+
+(defun ecred-conn-req (cids &key (psm ble:+psm-eatt+) (mtu 517) (mps 247)
+                                 (credits 10) (ident 7))
+  "An Enhanced Credit Based Connection Request frame, as it arrives."
+  (let ((f (ble:make-octets (+ 12 (* 2 (length cids))))))
+    (setf (aref f 0) ble::+l2cap-ecred-conn-req+
+          (aref f 1) ident)
+    (ble:u16le-put f 2 (+ 8 (* 2 (length cids))))   ; signalling length
+    (ble:u16le-put f 4 psm)
+    (ble:u16le-put f 6 mtu)
+    (ble:u16le-put f 8 mps)
+    (ble:u16le-put f 10 credits)
+    (loop for c in cids for i from 0
+          do (ble:u16le-put f (+ 12 (* 2 i)) c))
+    f))
+
+(defun ecred-reconf-req (cids &key (mtu 517) (mps 247) (ident 9))
+  (let ((f (ble:make-octets (+ 8 (* 2 (length cids))))))
+    (setf (aref f 0) ble::+l2cap-ecred-reconf-req+
+          (aref f 1) ident)
+    (ble:u16le-put f 2 (+ 4 (* 2 (length cids))))
+    (ble:u16le-put f 4 mtu)
+    (ble:u16le-put f 6 mps)
+    (loop for c in cids for i from 0
+          do (ble:u16le-put f (+ 8 (* 2 i)) c))
+    f))
+
+(defmacro with-sig-capture ((var) &body body)
+  "Collect signalling frames as (CODE IDENT DATA) instead of sending them."
+  `(let ((,var '()))
+     (let ((ble::*l2cap-sig-sink*
+             (lambda (code ident data) (push (list code ident data) ,var))))
+       ,@body)
+     (setf ,var (nreverse ,var))
+     ,var))
+
+(defun conn-rsp-result (frames)
+  (let ((rsp (find ble::+l2cap-ecred-conn-rsp+ frames :key #'first)))
+    (when rsp (ble::u16-le (third rsp) 6))))
+
+(defun conn-rsp-dcids (frames)
+  (let* ((rsp (find ble::+l2cap-ecred-conn-rsp+ frames :key #'first))
+         (d (third rsp)))
+    (loop for off from 8 below (length d) by 2 collect (ble::u16-le d off))))
+
+(defun reconf-rsp-result (frames)
+  (let ((rsp (find ble::+l2cap-ecred-reconf-rsp+ frames :key #'first)))
+    (when rsp (ble::u16-le (third rsp) 0))))
+
+(test eatt-opens-the-bearers-a-peer-asks-for
+  (let* ((conn (eatt-fixture :listener t))
+         (frames (with-sig-capture (f)
+                   (ble::%eatt-handle-connect-request
+                    conn (ecred-conn-req '(#x0060 #x0061))))))
+    (is (= #x0000 (conn-rsp-result frames)) "all connections successful")
+    (is (= 2 (length (conn-rsp-dcids frames))) "one CID answered per CID asked")
+    (is (every #'plusp (conn-rsp-dcids frames)) "and none of them refused")
+    (is (= 2 (length (ble:hci-conn-eatt-bearers conn))) "two bearers exist")
+    ;; They must also be reachable by the frame router, or nothing the peer
+    ;; sends on them will ever be reassembled.
+    (is (= 2 (length (ble::hci-conn-coc-channels conn)))
+        "and each is registered where %COC-NOTE-FRAME will find it")))
+
+(test eatt-partial-acceptance-keeps-the-bearers-it-could-open
+  "Room for one, asked for three. The response must say `some refused' and
+carry a real CID for the one that opened -- a flat refusal would throw away a
+working bearer the peer is entitled to use."
+  (let* ((conn (eatt-fixture :listener t :max-bearers 1))
+         (frames (with-sig-capture (f)
+                   (ble::%eatt-handle-connect-request
+                    conn (ecred-conn-req '(#x0060 #x0061 #x0062))))))
+    (is (= #x0004 (conn-rsp-result frames)) "some refused -- no resources")
+    (let ((dcids (conn-rsp-dcids frames)))
+      (is (= 3 (length dcids)) "still one slot per requested CID")
+      (is (plusp (first dcids)) "the first opened")
+      (is (every #'zerop (rest dcids)) "the rest are zero, meaning refused"))
+    (is (= 1 (length (ble:hci-conn-eatt-bearers conn))))))
+
+(test eatt-is-refused-when-nobody-is-listening
+  (let* ((conn (eatt-fixture))                 ; no EATT-LISTEN
+         (frames (with-sig-capture (f)
+                   (ble::%eatt-handle-connect-request
+                    conn (ecred-conn-req '(#x0060))))))
+    (is (= #x0002 (conn-rsp-result frames)) "SPSM not supported")
+    (is (null (ble:hci-conn-eatt-bearers conn)) "and no bearer was created"))
+  ;; A request for some other PSM is not ours to accept even when we are
+  ;; listening for EATT.
+  (let* ((conn (eatt-fixture :listener t))
+         (frames (with-sig-capture (f)
+                   (ble::%eatt-handle-connect-request
+                    conn (ecred-conn-req '(#x0060) :psm #x0080)))))
+    (is (= #x0002 (conn-rsp-result frames)) "a different PSM is refused too")))
+
+(test eatt-bearers-are-refused-until-the-link-is-encrypted
+  "A peripheral that hands out bearers before pairing has moved its whole
+attribute database onto a channel it never secured."
+  (let* ((secure nil)
+         (conn (eatt-fixture :listener t :encrypted-p (lambda () secure)))
+         (before (with-sig-capture (f)
+                   (ble::%eatt-handle-connect-request
+                    conn (ecred-conn-req '(#x0060))))))
+    (is (= #x0005 (conn-rsp-result before)) "insufficient authentication")
+    (is (null (ble:hci-conn-eatt-bearers conn)))
+    (setf secure t)
+    (let ((after (with-sig-capture (f)
+                   (ble::%eatt-handle-connect-request
+                    conn (ecred-conn-req '(#x0060 ))))))
+      (is (= #x0000 (conn-rsp-result after)) "and accepted once it is")
+      (is (= 1 (length (ble:hci-conn-eatt-bearers conn)))))))
+
+(test eatt-refuses-parameters-it-cannot-honour
+  ;; An enhanced bearer's floor is 64, unlike the fixed channel's 23.
+  (let ((frames (with-sig-capture (f)
+                  (ble::%eatt-handle-connect-request
+                   (eatt-fixture :listener t)
+                   (ecred-conn-req '(#x0060) :mtu 23)))))
+    (is (= #x000B (conn-rsp-result frames)) "MTU below 64 is unacceptable"))
+  (let ((frames (with-sig-capture (f)
+                  (ble::%eatt-handle-connect-request
+                   (eatt-fixture :listener t)
+                   (ecred-conn-req '(#x0060) :mps 16)))))
+    (is (= #x000B (conn-rsp-result frames)) "and so is an MPS below 64"))
+  ;; A CID the peer is already using would make two channels indistinguishable
+  ;; on receive.
+  (let ((conn (eatt-fixture :listener t)))
+    (with-sig-capture (f)
+      (ble::%eatt-handle-connect-request conn (ecred-conn-req '(#x0060))))
+    (let ((frames (with-sig-capture (f)
+                    (ble::%eatt-handle-connect-request
+                     conn (ecred-conn-req '(#x0060) :ident 8)))))
+      (is (= #x000A (conn-rsp-result frames)) "source CID already allocated"))))
+
+(test eatt-simultaneous-open-is-broken-by-role
+  "Both ends asking at once. Somebody has to give way or each refuses the
+other and neither gets any bearers."
+  ;; We are the Peripheral with a request outstanding: we yield and accept.
+  (let ((conn (eatt-fixture :listener t :role :peripheral)))
+    (setf (ble::hci-conn-eatt-pending conn) 42)
+    (let ((frames (with-sig-capture (f)
+                    (ble::%eatt-handle-connect-request
+                     conn (ecred-conn-req '(#x0060))))))
+      (is (= #x0000 (conn-rsp-result frames)) "the Peripheral accepts")
+      (is (null (ble::hci-conn-eatt-pending conn))
+          "and abandons its own request, so the response to it finds nobody
+           waiting")))
+  ;; We are the Central: we keep ours and refuse theirs.
+  (let ((conn (eatt-fixture :listener t :role :central)))
+    (setf (ble::hci-conn-eatt-pending conn) 42)
+    (let ((frames (with-sig-capture (f)
+                    (ble::%eatt-handle-connect-request
+                     conn (ecred-conn-req '(#x0060))))))
+      (is (= #x000B (conn-rsp-result frames)) "the Central refuses")
+      (is (eql 42 (ble::hci-conn-eatt-pending conn))
+          "and keeps its own request in flight"))))
+
+;;; Reconfigure. The CID convention here is backwards from every other
+;;; command that names a channel, so it gets a test of its own.
+
+(defun eatt-two-bearers ()
+  "A connection with two bearers already open, as the responder."
+  (let ((conn (eatt-fixture :listener t)))
+    (with-sig-capture (f)
+      (ble::%eatt-handle-connect-request conn (ecred-conn-req '(#x0060 #x0061))))
+    conn))
+
+(test eatt-reconfigure-names-the-senders-own-cids
+  "THE GOTCHA. Disconnection Request names the CID at the RECEIVER; Reconfigure
+Request names the CIDs at the SENDER, and the receiver resolves them against
+the CIDs it sends to. Getting it backwards makes every channel look unknown."
+  (let ((conn (eatt-two-bearers)))
+    ;; 0x0060 and 0x0061 are the peer's CIDs -- our DCIDs. That is what a
+    ;; conforming peer puts in the request, and it must resolve.
+    (let ((frames (with-sig-capture (f)
+                    (ble::%eatt-handle-reconfigure-request
+                     conn (ecred-reconf-req '(#x0060 #x0061) :mtu 600)))))
+      (is (= #x0000 (reconf-rsp-result frames))
+          "the peer's own CIDs resolve"))
+    ;; Our SCIDs are meaningless in this direction, and naming them must fail
+    ;; rather than accidentally matching something.
+    (let* ((ours (mapcar (lambda (b) (ble:l2cap-coc-scid (ble::eatt-bearer-coc b)))
+                         (ble:hci-conn-eatt-bearers conn)))
+           (frames (with-sig-capture (f)
+                     (ble::%eatt-handle-reconfigure-request
+                      conn (ecred-reconf-req ours :mtu 700)))))
+      (is (= #x0003 (reconf-rsp-result frames))
+          "and our own CIDs do not -- invalid CID, not a silent match"))))
+
+(test eatt-reconfigure-may-raise-the-mtu-but-never-lower-it
+  (let ((conn (eatt-two-bearers)))
+    (let ((frames (with-sig-capture (f)
+                    (ble::%eatt-handle-reconfigure-request
+                     conn (ecred-reconf-req '(#x0060) :mtu 600)))))
+      (is (= #x0000 (reconf-rsp-result frames)) "raising is fine")
+      (is (= 600 (ble:l2cap-coc-peer-mtu
+                  (ble::eatt-bearer-coc
+                   (first (ble:hci-conn-eatt-bearers conn)))))
+          "and it takes effect"))
+    ;; Lowering must be refused: the peer may already have sent a PDU sized by
+    ;; the larger value.
+    (let ((frames (with-sig-capture (f)
+                    (ble::%eatt-handle-reconfigure-request
+                     conn (ecred-reconf-req '(#x0060) :mtu 100)))))
+      (is (= #x0001 (reconf-rsp-result frames)) "reduction in MTU refused")
+      (is (= 600 (ble:l2cap-coc-peer-mtu
+                  (ble::eatt-bearer-coc
+                   (first (ble:hci-conn-eatt-bearers conn)))))
+          "and nothing was applied"))))
+
+(test eatt-reconfigure-refuses-an-mps-cut-across-several-channels
+  "One channel may narrow its MPS; several at once may not."
+  (let ((conn (eatt-two-bearers)))
+    (let ((frames (with-sig-capture (f)
+                    (ble::%eatt-handle-reconfigure-request
+                     conn (ecred-reconf-req '(#x0060 #x0061) :mps 100)))))
+      (is (= #x0002 (reconf-rsp-result frames)) "refused for two channels"))
+    (let ((frames (with-sig-capture (f)
+                    (ble::%eatt-handle-reconfigure-request
+                     conn (ecred-reconf-req '(#x0060) :mps 100)))))
+      (is (= #x0000 (reconf-rsp-result frames)) "allowed for one"))))
+
+(test eatt-reconfigure-refuses-nonsense
+  (let ((conn (eatt-two-bearers)))
+    (is (= #x0004 (reconf-rsp-result
+                   (with-sig-capture (f)
+                     (ble::%eatt-handle-reconfigure-request
+                      conn (ecred-reconf-req '(#x0060) :mtu 32)))))
+        "an MTU below the enhanced floor")
+    (is (= #x0003 (reconf-rsp-result
+                   (with-sig-capture (f)
+                     (ble::%eatt-handle-reconfigure-request
+                      conn (ecred-reconf-req '(#x00FF))))))
+        "a CID that is not a channel")))
+
+;;; --- what an enhanced bearer changes about ATT itself -------------------
+
+(test exchange-mtu-is-refused-on-an-enhanced-bearer
+  "The MTU came from L2CAP and cannot be renegotiated. Answering would tell
+the peer we had changed a number that in fact cannot change, which is worse
+than refusing."
+  (let* ((lb (make-loopback (demo-server)))
+         (chan (loopback-client lb)))
+    ;; On the fixed channel it is answered as always.
+    (let ((rsp (ble:att-request chan (hex->octets "02" "F700"))))
+      (is (= #x03 (aref rsp 0)) "Exchange MTU Response on the fixed channel"))
+    ;; Serving a bearer, it is not.
+    (let* ((ble::*att-bearer-mtu* 251)
+           (rsp (ble:att-request chan (hex->octets "02" "F700"))))
+      (is-true (ble:att-error-p rsp) "an Error Response on a bearer")
+      (is (= #x06 (aref rsp 4)) "request not supported")
+      (is (= #x02 (aref rsp 1)) "naming Exchange MTU as the request refused"))))
+
+(test responses-are-sized-by-the-bearer-not-by-the-server
+  "A link can carry several bearers with different MTUs at once, so `the
+server's MTU' stops being a single number the moment EATT is in play."
+  (let* ((server (ble:make-gatt-server :mtu 247))
+         (long (make-array 200 :element-type '(unsigned-byte 8) :initial-element 3)))
+    (ble:gatt-add-service server #xFF00)
+    (let ((h (ble:gatt-add-characteristic server :uuid #xFF01
+                                                 :properties '(:read)
+                                                 :value long)))
+      (let* ((lb (make-loopback server))
+             (chan (loopback-client lb))
+             (req (ble:make-octets 3)))
+        (setf (aref req 0) #x0A)
+        (ble:u16le-put req 1 h)
+        ;; On the fixed channel the server is held to its NEGOTIATED MTU,
+        ;; which is still 23 -- :MTU 247 set what it advertises it can
+        ;; receive, and nothing has agreed to it. So 22 octets come back.
+        (let ((rsp (ble:att-request chan req)))
+          (is (= 22 (1- (length rsp)))
+              "the fixed channel is capped at its unnegotiated 23"))
+        ;; A bearer's MTU governs instead, and here it is the LARGER of the
+        ;; two -- which is the case that matters, because a bearer capped at
+        ;; the fixed channel's number would make EATT pointless.
+        (let* ((ble::*att-bearer-mtu* 64)
+               (rsp (ble:att-request chan req)))
+          (is (= 63 (1- (length rsp)))
+              "a 64-octet bearer returns 63, not the fixed channel's 22"))
+        ;; And a wide one carries the whole value in a single response.
+        (let* ((ble::*att-bearer-mtu* 517)
+               (rsp (ble:att-request chan req)))
+          (is (= 200 (1- (length rsp)))
+              "a 517-octet bearer needs no truncation at all"))))))
+
+(test the-client-refuses-to-send-exchange-mtu-on-a-bearer
+  "Refused on the way out as well as on the way in: a peer that answers a
+prohibited request leaves everything afterwards sized by a number it is not
+honouring, which is the quiet failure worth preventing at the source."
+  (let ((bearer (ble::%make-eatt-bearer
+                 (ble::%make-l2cap-coc :scid #x0040 :dcid #x0060
+                                       :mtu 251 :peer-mtu 517))))
+    (is (= 251 (ble:eatt-bearer-mtu bearer))
+        "the bearer's MTU is the smaller of the two directions")
+    (signals error (ble:att-exchange-mtu bearer 517))))
