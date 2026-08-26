@@ -15,7 +15,7 @@ mock-up — the addresses, temperatures and signal strengths are whatever they
 were at the time.
 
 ```
-connected to F0:FA:AD:BE:D0:25
+connected to FE:D5:8B:E1:76:7D
 paired; encryption -> T
 NUS attached, MTU 247
 
@@ -29,13 +29,13 @@ NUS attached, MTU 247
 
 3. A real sensor reading -- no characteristic was defined for this, and none had to be.
    (with-open-file (s "/sys/class/thermal/thermal_zone0/temp") (/ (read s) 1000.0))
-   => 57.452
+   => 58.426
 
-4. Now change the running image. This function did not exist a moment ago.
+4. Define a function in the running image. Note what this does NOT do: it adds nothing to the GATT database, and no client is told anything.
    (defun celsius->f (c) (+ 32 (* 9/5 c)))
    => CELSIUS->F
 
-5. ...and call it. The device learned a new capability mid-conversation, which is the difference between a REPL and a protocol.
+5. ...and call it anyway. It is reachable because the REPL evaluates whatever arrives -- not because anything was wired up.
    (celsius->f 21)
    => 349/5
 
@@ -45,7 +45,7 @@ NUS attached, MTU 247
 
 7. Ask the Bluetooth stack, over Bluetooth, what radios it has.
    (mapcar (lambda (a) (list (hci-adapter-index a) (hci-adapter-bus a))) (list-hci-adapters))
-   => ((0 :SERIAL) (5 :USB) (6 :USB))
+   => ((0 :SERIAL) (1 :USB) (2 :USB))
 
 8. Now the self-referential part: the flow-control window of the very link this answer is travelling on.
    (hci-socket-acl-credits (hci-conn-sock lisp-repl:*connection*))
@@ -67,9 +67,16 @@ Operation was (/ 1 0).
                          Stream: #<dynamic-extent STRING-INPUT-STREAM (unavailable) from "#.(+ 1 2)">
 ```
 
-Steps 4 and 5 are the ones worth pausing on: the device gained a capability
-*mid-conversation*. Nothing in a GATT database can do that — a profile only
-answers questions somebody anticipated when they wrote it.
+Steps 4 and 5 are worth pausing on, and worth being precise about. `defun`
+puts a function in the running image; it wires nothing into GATT, adds no
+characteristic, and notifies no client. The database is exactly what it was.
+Step 5 reaches it anyway, because the one characteristic that *is* in the
+database evaluates whatever arrives.
+
+That is the whole trick, and it is smaller than it looks: a profile can only
+answer questions somebody anticipated when they defined the characteristics,
+and this sidesteps that by defining a characteristic whose meaning is
+"evaluate this" — which is also precisely why it needs an encrypted link.
 
 Steps 8 and 9 are the reason `lisp-repl:*connection*` exists. It is bound to
 the live connection while a session is up, so evaluated code can interrogate

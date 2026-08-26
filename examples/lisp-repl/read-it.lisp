@@ -75,10 +75,11 @@ it for anything that must not be run twice."
      "A real sensor reading -- no characteristic was defined for this, and
       none had to be.")
     ("(defun celsius->f (c) (+ 32 (* 9/5 c)))"
-     "Now change the running image. This function did not exist a moment ago.")
+     "Define a function in the running image. Note what this does NOT do: it
+      adds nothing to the GATT database, and no client is told anything.")
     ("(celsius->f 21)"
-     "...and call it. The device learned a new capability mid-conversation,
-      which is the difference between a REPL and a protocol.")
+     "...and call it anyway. It is reachable because the REPL evaluates
+      whatever arrives -- not because anything was wired up.")
     ("(in-package :ble)"
      "Move into the library's own package.")
     ("(mapcar (lambda (a) (list (hci-adapter-index a) (hci-adapter-bus a)))
