@@ -68,6 +68,12 @@
           hci-adapter-product
           hci-adapter-address
           hci-adapter-usb-p
+          hci-adapter-coded-phy
+          hci-adapter-coded-phy-p
+          hci-le-features
+          hci-coded-phy-p
+          le-feature-set-p
+          +le-feature-coded-phy+
           hci-adapter-label
           ;; LE scanning and advertising reports
           start-extended-scan

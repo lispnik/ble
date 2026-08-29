@@ -2430,3 +2430,69 @@ honouring, which is the quiet failure worth preventing at the source."
     (is (= 251 (ble:eatt-bearer-mtu bearer))
         "the bearer's MTU is the smaller of the two directions")
     (signals error (ble:att-exchange-mtu bearer 517))))
+
+;;; --- choosing an adapter ----------------------------------------------
+;;;
+;;; The rule that decides which radio a caller gets when it did not name one.
+;;; Worth testing directly because both halves fail silently: a wrong bit
+;;; offset makes every controller look Coded-incapable, and a wrong preference
+;;; hands back a radio that scans happily and reports nothing.
+
+(defun %features (&rest set-bits)
+  "An 8-octet LE FeatureSet with SET-BITS set."
+  (let ((v (make-array 8 :element-type '(unsigned-byte 8) :initial-element 0)))
+    (dolist (b set-bits v)
+      (setf (aref v (floor b 8))
+            (logior (aref v (floor b 8)) (ash 1 (mod b 8)))))))
+
+(test le-feature-bits-are-read-little-endian
+  "Bit 11 lives in byte 1, bit 3. Off-by-one here would make every adapter
+report no Coded PHY, which looks exactly like hardware that has none."
+  (is (= 11 ble:+le-feature-coded-phy+))
+  (is-true (ble:le-feature-set-p (%features 11) 11))
+  (is-false (ble:le-feature-set-p (%features 8 12) 11)
+            "2M and Extended Advertising must not be mistaken for Coded")
+  ;; The byte the bit actually lands in, asserted concretely.
+  (is (equalp #(0 #b1000 0 0 0 0 0 0) (coerce (%features 11) 'simple-vector)))
+  (is-false (ble:le-feature-set-p nil 11) "no answer is not a yes")
+  (is-false (ble:le-feature-set-p (%features) 11)))
+
+(defun %adapter (index bus coded &optional product)
+  (ble::make-hci-adapter :index index :bus bus :product product :coded-phy coded))
+
+(test default-hci-dev-prefers-a-coded-capable-radio-over-a-usb-one
+  "The regression this exists for: the deaf adapter is USB and lower-numbered,
+so the old `first USB dongle' rule picked it."
+  (let ((adapters (list (%adapter 0 :serial nil)
+                        (%adapter 1 :usb nil "USB2.0-BT")
+                        (%adapter 2 :usb t "TP-Link UB500"))))
+    (is (= 2 (ble:default-hci-dev adapters :coded)))
+    (is (= 1 (ble:default-hci-dev adapters :usb)) "the old rule, still available")
+    (is (= 0 (ble:default-hci-dev adapters :lowest)))))
+
+(test coded-is-the-default-preference
+  (let ((adapters (list (%adapter 0 :usb nil) (%adapter 1 :usb t))))
+    (is (= 1 (ble:default-hci-dev adapters)))))
+
+(test an-unasked-adapter-does-not-count-as-coded-capable
+  ":UNKNOWN means nobody could ask -- no CAP_NET_RAW, or a busy adapter. It
+must not be promoted to a yes, or the rule silently reverts to picking
+whatever came first."
+  (let ((adapters (list (%adapter 0 :usb :unknown) (%adapter 1 :usb :unknown))))
+    (is-false (ble:hci-adapter-coded-phy-p (first adapters)))
+    ;; Falls back to the USB rule rather than refusing.
+    (is (= 0 (ble:default-hci-dev adapters :coded)))))
+
+(test with-no-coded-radio-it-falls-back-instead-of-erroring
+  (let ((adapters (list (%adapter 0 :serial nil) (%adapter 1 :usb nil))))
+    (is (= 1 (ble:default-hci-dev adapters :coded)) "prefers USB when no Coded")))
+
+(test a-deaf-adapter-is-labelled-as-such
+  "Otherwise nothing in the name or the bus reveals it."
+  (is (search "no Coded PHY"
+              (ble:hci-adapter-label (%adapter 1 :usb nil "USB2.0-BT") :address nil)))
+  (is (search "Coded PHY"
+              (ble:hci-adapter-label (%adapter 2 :usb t "UB500") :address nil)))
+  (is-false (search "Coded"
+                    (ble:hci-adapter-label (%adapter 3 :usb :unknown "x") :address nil))
+            "an adapter nobody asked about carries no claim either way"))

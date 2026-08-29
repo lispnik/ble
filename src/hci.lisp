@@ -41,6 +41,7 @@
 (defconstant +ogf-info-params+    #x04)
 (defconstant +ocf-read-bd-addr+   #x0009)
 (defconstant +ocf-le-set-default-phy+ #x0031)
+(defconstant +ocf-le-read-local-supported-features+ #x0003)
 (defconstant +hci-cmd-complete-evt+ #x0E)
 ;; Here rather than beside its friends in hci-conn.lisp because SEND-HCI-COMMAND
 ;; needs it and that file loads later -- a forward reference compiles to an
@@ -312,6 +313,49 @@ behaviour and still what an endless scan loop wants."
       ;; Only close what we opened; a caller's socket is not ours to shut.
       (when own-socket (close-hci-socket sock)))))
 
+(defconstant +le-feature-coded-phy+ 11
+  "Bit in the LE FeatureSet for LE Coded PHY (Core spec Vol 6, Part B, 4.6).
+
+Bit 8 is 2M and bit 12 is Extended Advertising, for reference -- a controller
+can perfectly well have those and not this one.")
+
+(defun hci-le-features (&key (dev 0) sock)
+  "The controller's LE FeatureSet as 8 octets, or NIL if it will not say.
+
+HCI LE Read Local Supported Features. Needs CAP_NET_RAW like every other
+command here; a failure is reported as NIL rather than signalled, because the
+callers use this to choose between adapters and an adapter that cannot be
+asked is simply one they should not pick."
+  (let* ((own-socket (null sock))
+         (sock (or sock (ignore-errors (open-hci-socket :dev dev)))))
+    (when sock
+      (unwind-protect
+           (ignore-errors
+            (let ((params (command-return-params
+                           (send-hci-command sock +ogf-le+
+                                             +ocf-le-read-local-supported-features+
+                                             #()
+                                             :name "LE_Read_Local_Supported_Features"
+                                             :timeout-ms 2000))))
+              (when (and params (>= (length params) 8))
+                (subseq params 0 8))))
+        (when own-socket (ignore-errors (close-hci-socket sock)))))))
+
+(defun le-feature-set-p (features bit)
+  "True when BIT is set in an 8-octet LE FeatureSet, little-endian."
+  (and features
+       (< (floor bit 8) (length features))
+       (logbitp (mod bit 8) (aref features (floor bit 8)))))
+
+(defun hci-coded-phy-p (&key (dev 0) sock)
+  "True when hci<DEV> can receive the LE Coded PHY.
+
+This is a property of the silicon, not a setting: a Bluetooth 4.x controller
+cannot be configured into hearing Coded PHY, and a scan on one succeeds while
+reporting nothing at all. That failure is indistinguishable from a quiet
+neighbourhood, which is why it is worth asking the controller outright."
+  (le-feature-set-p (hci-le-features :dev dev :sock sock) +le-feature-coded-phy+))
+
 (defun hci-set-default-phy (&key (dev 0) (tx-phys #x05) (rx-phys #x05))
   "Issue HCI LE Set Default PHY on hci<DEV>. TX-PHYS / RX-PHYS are bitmasks
 (bit0 = 1M, bit1 = 2M, bit2 = Coded); default #x05 = 1M + Coded. all_phys
@@ -347,9 +391,19 @@ caller believe it now prefers a PHY it cannot use."
   index        ; N in hciN
   bus          ; :usb | :serial | :other
   product      ; USB product string, or NIL
-  address)     ; BD_ADDR (on-air order) if it could be read, else NIL
+  address              ; BD_ADDR (on-air order) if it could be read, else NIL
+  ;; T or NIL once the controller has been asked; :UNKNOWN until then, which
+  ;; is the default on purpose. NIL is a finding -- "this radio cannot hear
+  ;; Coded PHY" -- and an adapter nobody asked about must not make that claim,
+  ;; whether it was built by hand or enumerated with READ-FEATURES off.
+  (coded-phy :unknown))
 
 (defun hci-adapter-usb-p (a) (eq (hci-adapter-bus a) :usb))
+
+(defun hci-adapter-coded-phy-p (a)
+  "True only when this adapter is KNOWN to receive the Coded PHY. :UNKNOWN --
+never asked, or the controller would not answer -- is not a yes."
+  (eq t (hci-adapter-coded-phy a)))
 
 (defparameter +sysfs-bluetooth+ #p"/sys/class/bluetooth/")
 
@@ -376,10 +430,14 @@ interface itself doesn't carry one). NIL for non-USB or unreadable."
          (string-trim '(#\Space #\Newline #\Return)
                       (uiop:read-file-string file)))))))
 
-(defun list-hci-adapters (&key (max-index 15) (read-address t))
-  "Enumerate local HCI adapters, lowest index first. READ-ADDRESS also asks
-each controller for its BD_ADDR, which needs CAP_NET_RAW and can fail on a
-busy or downed adapter -- failure just leaves ADDRESS NIL."
+(defun list-hci-adapters (&key (max-index 15) (read-address t) (read-features t))
+  "Enumerate local HCI adapters, lowest index first.
+
+READ-ADDRESS also asks each controller for its BD_ADDR, and READ-FEATURES for
+its LE FeatureSet. Both need CAP_NET_RAW and can fail on a busy or downed
+adapter; failure leaves ADDRESS NIL and CODED-PHY :UNKNOWN rather than
+signalling, since a caller comparing adapters wants the ones it could ask
+about, not an error."
   (loop for i from 0 to max-index
         when (probe-file (merge-pathnames (format nil "hci~D/uevent" i)
                                           +sysfs-bluetooth+))
@@ -388,27 +446,56 @@ busy or downed adapter -- failure just leaves ADDRESS NIL."
                    :bus (%adapter-bus i)
                    :product (%adapter-product i)
                    :address (and read-address
-                                 (ignore-errors (hci-read-bd-addr :dev i))))))
+                                 (ignore-errors (hci-read-bd-addr :dev i)))
+                   :coded-phy (if read-features
+                                  (let ((f (hci-le-features :dev i)))
+                                    (if f
+                                        (and (le-feature-set-p
+                                              f +le-feature-coded-phy+)
+                                             t)
+                                        :unknown))
+                                  :unknown))))
 
-(defun default-hci-dev (&optional adapters (prefer :usb))
+(defun default-hci-dev (&optional adapters (prefer :coded))
   "Index of the adapter to use when the caller didn't name one.
 
-PREFER :USB picks the first USB dongle -- the right rule when you need the
-Coded PHY, which built-in radios generally cannot receive at all. PREFER :LOWEST picks the lowest index present, which is the right rule
-for an ordinary 1M-PHY peripheral and is not merely the lazy option: on the
-development Pi the built-in radio is the only one that can hear some devices,
-while both USB dongles report nothing.
+PREFER :CODED picks a controller that actually reports LE Coded PHY support,
+which is the only rule that works when the devices you are looking for are
+Coded-only. It is the default because the alternative fails silently: a scan
+on a 4.x controller succeeds, reports nothing, and is indistinguishable from
+an empty room.
 
-Which rule is correct depends on the device you are looking for, so it is a
-parameter rather than a default someone has to remember to override."
+:USB picks the first USB dongle. That was the previous default and it is too
+coarse on any machine with a mixed bag of dongles -- a 4.0-era USB adapter is
+still USB, so this rule will happily hand back a radio that cannot hear a
+Coded advertiser. Kept for callers that want the old behaviour, and as the
+fallback below.
+
+:LOWEST picks the lowest index present, which is right for an ordinary 1M-PHY
+peripheral and is not merely the lazy option: on the development Pi the
+built-in radio is the only one that can hear some devices, while the USB
+dongles report nothing.
+
+Which rule is correct depends on what you are looking for, so it stays a
+parameter. Note :CODED needs the FeatureSet, so pass ADAPTERS from
+LIST-HCI-ADAPTERS with READ-FEATURES on (the default) or every adapter reads
+:UNKNOWN and this falls through to :USB."
   (let ((adapters (sort (copy-list (or adapters (list-hci-adapters :read-address nil)))
                         #'< :key #'hci-adapter-index)))
-    (ecase prefer
-      (:usb    (let ((usb (find-if #'hci-adapter-usb-p adapters)))
-                 (cond (usb      (hci-adapter-index usb))
-                       (adapters (hci-adapter-index (first adapters)))
-                       (t 0))))
-      (:lowest (if adapters (hci-adapter-index (first adapters)) 0)))))
+    (flet ((first-usb ()
+             (let ((usb (find-if #'hci-adapter-usb-p adapters)))
+               (cond (usb      (hci-adapter-index usb))
+                     (adapters (hci-adapter-index (first adapters)))
+                     (t 0)))))
+      (ecase prefer
+        (:coded  (let ((coded (find-if #'hci-adapter-coded-phy-p adapters)))
+                   ;; No Coded-capable adapter, or none that would answer:
+                   ;; fall back rather than refuse. The caller may be after a
+                   ;; 1M device, and a wrong guess it can override beats an
+                   ;; error it cannot.
+                   (if coded (hci-adapter-index coded) (first-usb))))
+        (:usb    (first-usb))
+        (:lowest (if adapters (hci-adapter-index (first adapters)) 0))))))
 
 (defun hci-adapter-label (a &key (address t))
   "Human-readable one-liner for an adapter, e.g.
@@ -416,14 +503,24 @@ parameter rather than a default someone has to remember to override."
 
 With :ADDRESS NIL the BD_ADDR is left off. That form is for UI widgets: the
 address roughly doubles the width, and in the web GUI's adapter picker it was
-wide enough to wrap the whole control bar onto a second row."
-  (format nil "hci~D - ~A (~A)~@[ ~A~]"
+wide enough to wrap the whole control bar onto a second row.
+
+An adapter known NOT to do Coded PHY is marked, because that is the property
+that decides whether it can hear a Coded-only device at all, and it is
+otherwise invisible -- such an adapter scans happily and reports nothing. A
+controller that was never asked carries no mark, since :UNKNOWN is not a
+finding."
+  (format nil "hci~D - ~A (~A~@[, ~A~])~@[ ~A~]"
           (hci-adapter-index a)
           (or (hci-adapter-product a)
               (case (hci-adapter-bus a)
                 (:serial "built-in UART radio")
                 (t "adapter")))
           (case (hci-adapter-bus a) (:usb "USB") (:serial "UART") (t "?"))
+          (case (hci-adapter-coded-phy a)
+            ((nil) "no Coded PHY")
+            ((t) "Coded PHY")
+            (t nil))
           (and address (hci-adapter-address a)
                (format-mac (hci-adapter-address a)))))
 
